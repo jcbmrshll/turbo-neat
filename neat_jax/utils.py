@@ -29,7 +29,7 @@ def apply_where(
 
 def apply(tree: chex.ArrayTree, fn: Callable, *args, **kwargs) -> chex.ArrayTree:
     """Apply a function to a batch of genomes
-     This will usually be an unbound method of Genome
+     This will usually be one of the genome functions in neat_jax.genome
 
     Additional arguments can be passed via args and kwargs:
      * args are vmapped

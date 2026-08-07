@@ -8,9 +8,19 @@ import jax.numpy as jnp
 
 import wandb
 from neat_jax.config import NEATConfig
-from neat_jax.genome import Genome, apply, init_genome
+from neat_jax.genome import (
+    Genome,
+    apply,
+    extend_capacity,
+    get_hidden_node_counts,
+    init_genome,
+    is_almost_full,
+    prepare_for_crossover,
+    prepare_for_inference,
+)
 from neat_jax.logging import log_to_wandb, render_and_log_episode
-from neat_jax.population import Population, _init_population
+from neat_jax.population import Population, _init_population, create_next_generation
+from neat_jax.species import fill_prev_stats, get_species_stats
 from neat_jax.utils import is_printable, mask_data
 from neat_jax.visualize import visualize_genome_as_nn
 
@@ -97,12 +107,12 @@ class NEAT:
 
         amount = new_capacity - population.batched_genome.capacity
         extended_genome = apply(
-            population.batched_genome, Genome.extend_capacity, amount=amount
+            population.batched_genome, extend_capacity, amount=amount
         )
         extended_prev_genome = apply(
-            population.prev_batched_genome, Genome.extend_capacity, amount=amount
+            population.prev_batched_genome, extend_capacity, amount=amount
         )
-        extended_champion = population.champion.extend_capacity(amount=amount)
+        extended_champion = extend_capacity(population.champion, amount=amount)
         return population.replace(
             batched_genome=extended_genome,
             prev_batched_genome=extended_prev_genome,
@@ -114,7 +124,7 @@ class NEAT:
     ) -> Population:
         """Evaluate the fitness of a genome"""
         population = population.replace(
-            batched_genome=population.batched_genome.prepare_for_inference()
+            batched_genome=prepare_for_inference(population.batched_genome)
         )
         genome = population.batched_genome
         # Evaluate fitness of population
@@ -132,11 +142,12 @@ class NEAT:
         """Evolve the population by one generation"""
         # Prepare genomes for crossover
         population = population.replace(
-            batched_genome=population.batched_genome.prepare_for_crossover()
+            batched_genome=prepare_for_crossover(population.batched_genome)
         )
         # create next generation
         selection_rng, rng = jax.random.split(rng)
-        population = population.create_next_generation(
+        population = create_next_generation(
+            population,
             selection_rng,
             selection_config=self.config.selection_config,
             mutation_config=self.config.mutation_config,
@@ -202,7 +213,9 @@ class NEAT:
             population = self.init_population(rng_init)
 
         prev_stats = dict()
-        species_stats = population.species_data.get_species_stats(prev_stats=prev_stats)
+        species_stats = get_species_stats(
+            population.species_data, prev_stats=prev_stats
+        )
         best_fitness = float("-inf")
 
         # this just functions as a logging job queue
@@ -224,24 +237,22 @@ class NEAT:
                     "mean_fitness": population.batched_genome.fitness.mean(),
                     "max_fitness": population.batched_genome.fitness.max(),
                     "min_fitness": population.batched_genome.fitness.min(),
-                    "mean_hidden_nodes": population.batched_genome.get_hidden_node_counts(
-                        use_condensed=False
+                    "mean_hidden_nodes": get_hidden_node_counts(
+                        population.batched_genome, use_condensed=False
                     ).mean(),
-                    "mean_condensed_hidden_nodes": population.batched_genome.get_hidden_node_counts(
-                        use_condensed=True
+                    "mean_condensed_hidden_nodes": get_hidden_node_counts(
+                        population.batched_genome, use_condensed=True
                     ).mean(),
                     "mean_connections": population.batched_genome.num_enabled_connections.mean(),
                     "mean_condensed_connections": population.batched_genome.condensed_size.mean(),
                     "num_species": num_unique_species,
                 }
             )
-            new_species_stats = population.species_data.get_species_stats(
-                prev_stats=prev_stats
+            new_species_stats = get_species_stats(
+                population.species_data, prev_stats=prev_stats
             )
             species_stats, prev_stats = new_species_stats, species_stats
-            prev_stats = population.species_data.fill_prev_stats(
-                prev_stats=prev_stats, cur_stats=species_stats
-            )
+            prev_stats = fill_prev_stats(prev_stats=prev_stats, cur_stats=species_stats)
 
             if self.test_champion:
                 # test against champion
@@ -337,7 +348,7 @@ class NEAT:
             print({k: f"{v:.2f}" for k, v in results.items() if is_printable(v)})
 
             # check if genome needs more space allocated
-            if population.batched_genome.is_almost_full().any():
+            if is_almost_full(population.batched_genome).any():
                 population = self.resize_genome(population)
                 print(f"Resized genome to {population.batched_genome.capacity} nodes")
 

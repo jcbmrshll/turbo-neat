@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from chex import dataclass
 from evojax.task.base import VectorizedTask
 
-from neat_jax.genome import Genome, apply
+from neat_jax.genome import Genome, apply, forward
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ def fitness(
     )
 
     def game_step(state, _):
-        actions = apply(genome, Genome.forward, state.task_state.obs, **kwargs)
+        actions = apply(genome, forward, state.task_state.obs, **kwargs)
         task_state, rewards, _ = step_fn(state.task_state, actions)
         return FitnessState(
             task_state=task_state, reward=state.reward + rewards
@@ -79,11 +79,9 @@ def fitness_2p(
         )
 
         def game_step(_, state):
-            action_left = apply(
-                idxd_left, Genome.forward, state.task_state.obs_left, **kwargs
-            )
+            action_left = apply(idxd_left, forward, state.task_state.obs_left, **kwargs)
             action_right = apply(
-                idxd_right, Genome.forward, state.task_state.obs_right, **kwargs
+                idxd_right, forward, state.task_state.obs_right, **kwargs
             )
             task_state, rewards_left, rewards_right, _ = step_fn(
                 state.task_state, action_left, action_right
@@ -129,12 +127,8 @@ def fitness_h2h(
     )
 
     def game_step(_, state):
-        action_left = apply(
-            genome_1, Genome.forward, state.task_state.obs_left, **kwargs
-        )
-        action_right = apply(
-            genome_2, Genome.forward, state.task_state.obs_right, **kwargs
-        )
+        action_left = apply(genome_1, forward, state.task_state.obs_left, **kwargs)
+        action_right = apply(genome_2, forward, state.task_state.obs_right, **kwargs)
         task_state, rewards_left, rewards_right, _ = step_fn(
             state.task_state, action_left, action_right
         )

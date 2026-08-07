@@ -6,9 +6,9 @@ import jax
 import wandb
 
 from neat_jax.config import NEATConfig
-from neat_jax.genome import Genome
+from neat_jax.genome import Genome, prepare_for_crossover, prepare_for_inference
 from neat_jax.neat import NEAT, FitnessFn
-from neat_jax.population import Population
+from neat_jax.population import Population, create_next_generation
 
 # returns grads and fitness (-loss)
 BackpropFn = Callable[[chex.PRNGKey, Genome, Dict], Tuple[chex.ArrayTree, chex.Array]]
@@ -63,14 +63,15 @@ class BackpropNEAT(NEAT):
         """Evolve the population by one generation"""
         # Prepare genomes for crossover
         population = population.replace(
-            batched_genome=population.batched_genome.prepare_for_crossover()
+            batched_genome=prepare_for_crossover(population.batched_genome)
         )
         # create next generation
         selection_rng, rng = jax.random.split(rng)
         population = jax.lax.cond(
             population.generation == 0,
             lambda _: population,
-            lambda _: population.create_next_generation(
+            lambda _: create_next_generation(
+                population,
                 selection_rng,
                 selection_config=self.config.selection_config,
                 mutation_config=self.config.mutation_config,
@@ -80,7 +81,7 @@ class BackpropNEAT(NEAT):
         )
         # topologically sort genomes to prepare for inference
         population = population.replace(
-            batched_genome=population.batched_genome.prepare_for_inference()
+            batched_genome=prepare_for_inference(population.batched_genome)
         )
         genome = population.batched_genome
         # Evaluate fitness of population
