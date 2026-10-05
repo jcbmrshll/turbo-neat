@@ -155,7 +155,7 @@ class Genome:
         mask = self.initialized_conn_mask
         innovation_ids = self.get_initialized_innovation_ids(mask)
         sorted_indices = jnp.lexsort((innovation_ids, mask.astype(jnp.int32) * -1))
-        sorted_graph = jax.tree_util.tree_map(lambda x: x[sorted_indices], self.graph)
+        sorted_graph = jax.tree.map(lambda x: x[sorted_indices], self.graph)
         return self.replace(graph=sorted_graph)  # pylint: disable=no-member
 
     def highest_common_node(self, other: Genome) -> chex.Array:
@@ -331,7 +331,7 @@ class Genome:
         """Extend the capacity of the genome.
         * this will cause JIT recompilation, so it should be called sparingly
         """
-        padded_graph = jax.tree_util.tree_map(
+        padded_graph = jax.tree.map(
             lambda x: jnp.pad(x, (0, amount), constant_values=0), self.graph
         )
         padded_node_mask = jnp.pad(self.node_mask, (0, amount), constant_values=False)
@@ -414,7 +414,7 @@ class Genome:
             valid_edges, fw_state.node_rank[graph.from_nodes], jnp.iinfo(jnp.int32).max
         )
         sorted_rank_indices = jnp.argsort(edge_ranks, axis=-1)
-        sorted_graph = jax.tree_util.tree_map(lambda x: x[sorted_rank_indices], graph)
+        sorted_graph = jax.tree.map(lambda x: x[sorted_rank_indices], graph)
         condensed_size = jnp.sum(edge_ranks != jnp.iinfo(jnp.int32).max, axis=-1)
         return self.replace(  # pylint: disable=no-member
             graph=sorted_graph, condensed_size=condensed_size
@@ -440,7 +440,7 @@ class Genome:
         take_node_from_other &= jnp.arange(self.capacity) <= highest_common_node
 
         return self.replace(  # pylint: disable=no-member
-            graph=jax.tree_util.tree_map(
+            graph=jax.tree.map(
                 lambda g, o: jnp.where(take_conn_from_other, o, g),
                 self.graph,
                 other.graph,
@@ -803,7 +803,7 @@ def init_genome(
         num_initial_connections=jnp.int32(0),
     )
     batch_rng = jax.random.split(rng, batch_size)
-    batched_genome = jax.tree_map(
+    batched_genome = jax.tree.map(
         lambda x: jnp.broadcast_to(x, (batch_size,) + x.shape), genome
     )
     if mode == "full":

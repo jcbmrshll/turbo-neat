@@ -151,7 +151,7 @@ class NEAT:
         genomes: Genome = population.batched_genome
         most_fit_genome_idx = jnp.argmax(genomes.fitness)
         # copy most fit genome to all idxs
-        dup_genome = jax.tree_map(
+        dup_genome = jax.tree.map(
             lambda x: jnp.broadcast_to(x[most_fit_genome_idx], x.shape), genomes
         )
         fitnesses, data = test_fn(
@@ -165,11 +165,11 @@ class NEAT:
         genome: Genome = population.batched_genome
         champion = population.champion
         challenger_idx = jnp.argmax(genome.fitness)
-        challenger = jax.tree_map(lambda x: x[challenger_idx], genome)
-        b_champion = jax.tree_map(
+        challenger = jax.tree.map(lambda x: x[challenger_idx], genome)
+        b_champion = jax.tree.map(
             lambda x, y: jnp.broadcast_to(x, y.shape), champion, genome
         )
-        b_challenger = jax.tree_map(
+        b_challenger = jax.tree.map(
             lambda x, y: jnp.broadcast_to(x, y.shape), challenger, genome
         )
         fitnesses, _ = h2h_fn(
@@ -183,7 +183,7 @@ class NEAT:
         new_champion = challenger_fitness > champion_fitness
         mask_fn = partial(mask_data, mask=new_champion)
         population = population.replace(
-            champion=jax.tree_map(mask_fn, challenger, champion)
+            champion=jax.tree.map(mask_fn, challenger, champion)
         )
         return population, challenger_fitness, new_champion
 
@@ -263,7 +263,7 @@ class NEAT:
                 best_fitness = max(max_fitness, best_fitness)
                 if improved:
                     population = population.replace(
-                        champion=jax.tree_map(
+                        champion=jax.tree.map(
                             lambda x: x[max_idx], population.batched_genome
                         )
                     )

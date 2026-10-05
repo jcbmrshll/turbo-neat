@@ -54,7 +54,7 @@ class Population:
             new = population.batched_genome
 
             species_data = population.species_data
-            new_i = jax.tree_map(lambda x: x[idx], new)
+            new_i = jax.tree.map(lambda x: x[idx], new)
             compatibility_fn = partial(
                 new_i.compatibility_distance, c_conn=c_conn, c_weight=c_weight
             )
@@ -235,12 +235,12 @@ class Population:
         parent_idxs_1: chex.Array,
         parent_idxs_2: chex.Array,
     ) -> Population:
-        parents_1 = jax.tree_map(lambda x: x[parent_idxs_1], self.batched_genome)
-        parents_2 = jax.tree_map(lambda x: x[parent_idxs_2], self.batched_genome)
+        parents_1 = jax.tree.map(lambda x: x[parent_idxs_1], self.batched_genome)
+        parents_2 = jax.tree.map(lambda x: x[parent_idxs_2], self.batched_genome)
         crossover_mask = (parents_1.fitness > parents_2.fitness) | elite_mask
         apply_mask = partial(mask_data, mask=crossover_mask)
-        superior_parents = jax.tree_map(apply_mask, parents_1, parents_2)
-        inferior_parents = jax.tree_map(apply_mask, parents_2, parents_1)
+        superior_parents = jax.tree.map(apply_mask, parents_1, parents_2)
+        inferior_parents = jax.tree.map(apply_mask, parents_2, parents_1)
         # perform crossover
         crossover_keys = jax.random.split(rng, self.batched_genome.batch_size)
         # apply crossover to non-elite members
@@ -411,7 +411,7 @@ def _init_population(
     return Population(
         batched_genome=batched_genome,
         prev_batched_genome=batched_genome,
-        champion=jax.tree_map(lambda x: x[0], batched_genome),
+        champion=jax.tree.map(lambda x: x[0], batched_genome),
         next_innovation_id=jnp.int32(next_innovation_id),
         generation=jnp.int32(generation),
         species_data=init_species_data(

@@ -24,7 +24,7 @@ def apply_where(
     mask_fn = partial(mask_data, mask=mask)
     partial_fn = partial(fn, **kwargs)
     vmapped_fn = jax.vmap(partial_fn)
-    return jax.tree_map(mask_fn, vmapped_fn(tree, *args), tree)
+    return jax.tree.map(mask_fn, vmapped_fn(tree, *args), tree)
 
 
 def apply(tree: chex.ArrayTree, fn: Callable, *args, **kwargs) -> chex.ArrayTree:
