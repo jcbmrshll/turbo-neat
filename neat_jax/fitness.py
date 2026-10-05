@@ -39,7 +39,7 @@ def fitness(
         ), task_state
 
     state, task_state_frames = jax.lax.scan(game_step, state, jnp.zeros(num_steps))
-    return state.reward, jax.tree_map(lambda x: x[:frames_len, 0], task_state_frames)
+    return state.reward, jax.tree.map(lambda x: x[:frames_len, 0], task_state_frames)
 
 
 @dataclass(frozen=True)
@@ -64,8 +64,8 @@ def fitness_2p(
         rng_left, rng_right, rng_init = jax.random.split(rng, 3)
         ids_left = jax.random.permutation(rng_left, genome.batch_size)
         ids_right = jax.random.permutation(rng_right, genome.batch_size)
-        idxd_left = jax.tree_map(lambda x: x[ids_left], genome)
-        idxd_right = jax.tree_map(lambda x: x[ids_right], genome)
+        idxd_left = jax.tree.map(lambda x: x[ids_left], genome)
+        idxd_right = jax.tree.map(lambda x: x[ids_right], genome)
 
         task_state = reset_fn(jax.random.split(rng_init, genome.batch_size))
         state = FitnessState2p(
