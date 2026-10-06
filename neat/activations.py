@@ -26,15 +26,3 @@ absl = jnp.abs
 sin = jnp.sin
 cos = jnp.cos
 exp = jnp.exp
-
-visualization_color_mapping = {
-    "iden": "webmaroon",
-    "relu": "midnightblue",
-    "sigmoid": "darkorchid4",
-    "tanh": "darkgreen",
-    "inv": "darkolivegreen",
-    "absolute": "darkslategray",
-    "sin": "firebrick4",
-    "cos": "olive",
-    "exp": "darkorange4",
-}

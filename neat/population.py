@@ -8,8 +8,8 @@ import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 
-from neat_jax.config import GenomeConfig, MutationConfig, SelectionConfig
-from neat_jax.genome import (
+from neat.config import GenomeConfig, MutationConfig, SelectionConfig
+from neat.genome import (
     Genome,
     add_random_connection,
     add_random_node,
@@ -19,8 +19,8 @@ from neat_jax.genome import (
     mutate_connections,
     mutate_nodes,
 )
-from neat_jax.genome import crossover as crossover_genomes
-from neat_jax.species import (
+from neat.genome import crossover as crossover_genomes
+from neat.species import (
     SpeciesData,
     assign_species,
     init_species_data,
@@ -29,7 +29,7 @@ from neat_jax.species import (
     remove_stagnant_species,
     reset_counts,
 )
-from neat_jax.utils import apply_where, mask_data, round_to_integers
+from neat.utils import apply_where, mask_data, round_to_integers
 
 
 @jax.tree_util.register_dataclass

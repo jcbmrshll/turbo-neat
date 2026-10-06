@@ -5,9 +5,9 @@ loss and are scored on fresh data; evolution then searches over topologies.
 
     uv run examples/spiral.py --generations 300
     uv run examples/spiral.py --dataset xor
-    uv run examples/spiral.py --wandb-project backprop-neat
+    uv run examples/spiral.py --monitor
 
-Rendering the network after each improvement needs the graphviz `dot` binary.
+Start the monitor first with `uv run turbo-neat-monitor`.
 """
 
 import argparse
@@ -17,15 +17,14 @@ from typing import Callable, Tuple
 
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
-import wandb
 
-import neat_jax.activations as act
-from neat_jax.backprop_neat import BackpropNEAT
-from neat_jax.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
-from neat_jax.genome import Genome, forward
-from neat_jax.species import make_remove_last_if_stagnant_and_full_stagnation_fn
-from neat_jax.utils import apply
+import neat.activations as act
+from monitor import DEFAULT_URL, Episode, Monitor
+from neat.backprop_neat import BackpropNEAT
+from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
+from neat.genome import Genome, forward
+from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
+from neat.utils import apply
 
 NUM_POINTS = 1000
 
@@ -178,15 +177,11 @@ def make_config() -> NEATConfig:
     )
 
 
-def render_fn(data):
-    """Scatter the test points, coloured by the class the best genome predicts."""
+def episode_fn(data):
+    """The test points with the best genome's predicted probabilities, for the monitor
+    to plot."""
     data = data.reshape(-1, 3)
-    predicted = (data[:, 2] > 0.5).tolist()
-    fig, ax = plt.subplots()
-    ax.scatter(data[:, 0], data[:, 1], c=["y" if p else "b" for p in predicted])
-    image = wandb.Image(fig)
-    plt.close(fig)
-    return image
+    return Episode("classification_2d", points=data[:, :2], probability=data[:, 2])
 
 
 def main():
@@ -197,9 +192,12 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=300)
     parser.add_argument(
-        "--wandb-project",
+        "--monitor",
+        nargs="?",
+        const=DEFAULT_URL,
         default=None,
-        help="log metrics and prediction plots to wandb",
+        metavar="URL",
+        help=f"log to a turbo-neat monitor (default {DEFAULT_URL})",
     )
     args = parser.parse_args()
 
@@ -208,9 +206,9 @@ def main():
         make_config(),
         backprop_fn=make_backprop_fn(generate),
         test_fn=make_test_fn(generate),
-        wandb_project=args.wandb_project,
+        monitor=Monitor(args.monitor, project="spiral") if args.monitor else None,
     )
-    bneat.run(seed=args.seed, num_generations=args.generations, render_fn=render_fn)
+    bneat.run(seed=args.seed, num_generations=args.generations, episode_fn=episode_fn)
 
 
 if __name__ == "__main__":

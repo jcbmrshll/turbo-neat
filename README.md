@@ -7,6 +7,14 @@ Inspired by compute constraints faced at that time, NEAT is an evolutionary trai
 
 ## Quickstart
 
+## Monitoring runs
+Training runs push metrics, episode renders and the champion's network to a small local dashboard:
+
+```sh
+uv run turbo-neat-monitor            # http://localhost:8008, runs stored in ./runs
+uv run examples/boids.py --monitor   # in another shell
+```
+
 ## Contributing
 
 ## Further Reading

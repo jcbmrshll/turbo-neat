@@ -6,10 +6,10 @@ from typing import Any, Callable, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
-import wandb
-from neat_jax.activations import ActivationSelector
-from neat_jax.config import GenomeConfig, NEATConfig
-from neat_jax.genome import (
+from monitor import Monitor
+from neat.activations import ActivationSelector
+from neat.config import GenomeConfig, NEATConfig
+from neat.genome import (
     Genome,
     extend_capacity,
     get_hidden_node_counts,
@@ -18,19 +18,19 @@ from neat_jax.genome import (
     prepare_for_crossover,
     prepare_for_inference,
 )
-from neat_jax.logging import log_to_wandb, render_and_log_episode
-from neat_jax.population import (
+from neat.logging import log_generation
+from neat.population import (
     Population,
     _init_population,
     create_next_generation,
 )
-from neat_jax.species import fill_prev_stats, get_species_stats
-from neat_jax.utils import apply, is_printable, mask_data
-from neat_jax.visualize import visualize_genome_as_nn
+from neat.species import fill_prev_stats, get_species_stats
+from neat.utils import apply, is_printable, mask_data
+from neat.visualize import genome_to_network
 
 # called with keyword arguments (rng, genome, activation_selector), or for head-to-head
 # functions (rng, genome_1, genome_2, activation_selector)
-# returns fitness and any auxiliary data (e.g. frames to render)
+# returns fitness and any auxiliary data (e.g. the episode, for the monitor)
 FitnessFn = Callable[..., Tuple[jax.Array, Any]]
 
 
@@ -206,14 +206,11 @@ class NEAT:
         fitness_fn: FitnessFn,
         h2h_test_fn: Optional[FitnessFn] = None,
         baseline_test_fn: Optional[FitnessFn] = None,
-        wandb_project: Optional[str] = None,
+        monitor: Optional[Monitor] = None,
     ):
         self.config = config
         self.activation_selector = config.genome_config.activation_selector
-        if wandb_project is not None:
-            self.wandb_run = wandb.init(project=wandb_project, config=config.to_dict())
-        else:
-            self.wandb_run = None
+        self.monitor = monitor
         self.evaluate_population = jax.jit(
             partial(
                 evaluate,
@@ -248,10 +245,33 @@ class NEAT:
         seed: int,
         num_generations: int,
         population: Optional[Population] = None,
-        render_fn: Optional[Callable] = None,
-        render_async: bool = True,
+        episode_fn: Optional[Callable] = None,
+        log_async: bool = True,
     ):
         """Run the NEAT algorithm"""
+        if self.monitor is not None:
+            self.monitor.start(
+                config={
+                    "run": {"seed": seed, "num_generations": num_generations},
+                    **self.config.to_dict(),
+                }
+            )
+        try:
+            return self._run(seed, num_generations, population, episode_fn, log_async)
+        except BaseException as e:
+            if self.monitor is not None:
+                interrupted = isinstance(e, KeyboardInterrupt)
+                self.monitor.finish("stopped" if interrupted else "crashed")
+            raise
+
+    def _run(
+        self,
+        seed: int,
+        num_generations: int,
+        population: Optional[Population],
+        episode_fn: Optional[Callable],
+        log_async: bool,
+    ):
         rng = jax.random.PRNGKey(seed)
         if population is None:
             rng_init, rng = jax.random.split(rng, 2)
@@ -325,70 +345,43 @@ class NEAT:
                         ),
                     )
 
-            # test against baseline and render video
-            render_data = None
+            # test against baseline, keeping the episode for the monitor
+            episode_data = None
             if improved:
-                # create nn visualization
-                visualize_genome_as_nn(
-                    population.champion,
-                    self.config.genome_config.activation_map,
-                    filename="neural_network",
-                    input_labels=self.config.genome_config.input_labels,
-                    output_labels=self.config.genome_config.output_labels,
-                )
+                if self.monitor is not None:
+                    results["network"] = genome_to_network(
+                        population.champion,
+                        self.config.genome_config.activation_map,
+                        input_labels=self.config.genome_config.input_labels,
+                        output_labels=self.config.genome_config.output_labels,
+                    )
 
                 if self.test_baseline:
-                    if self.wandb_run is not None:
-                        results["nn"] = wandb.Image("neural_network.png")
                     test_rng, rng = jax.random.split(rng)
-                    test_fitness, render_data = self.test_baseline(test_rng, population)
+                    test_fitness, episode_data = self.test_baseline(
+                        test_rng, population
+                    )
                     results["fitness_against_baseline"] = test_fitness
 
             # evolve population
             population = self.evolve(gen_rng, population)
 
-            if (
-                self.wandb_run is not None
-                and render_fn is not None
-                and render_data is not None
-            ):
-                # spin off a thread to render and log because rendering is expensive and i/o bound
+            if self.monitor is not None:
+                # logging is i/o bound (and copies the episode off the device), so it
+                # goes to a background thread
+                log_args = (
+                    self.monitor,
+                    dict(prev_stats),
+                    dict(results),
+                    g,
+                    episode_data,
+                    episode_fn,
+                )
                 with jax.default_device(jax.devices("cpu")[0]):
-                    if render_async:
-                        logger.submit(
-                            render_and_log_episode,
-                            self.wandb_run,
-                            prev_stats,
-                            results,
-                            render_data,
-                            render_fn,
-                            g,
-                        )
+                    if log_async:
+                        logger.submit(log_generation, *log_args)
                     else:
-                        render_and_log_episode(
-                            self.wandb_run,
-                            prev_stats,
-                            results,
-                            render_data,
-                            render_fn,
-                            g,
-                        )
-            elif self.wandb_run is not None:
-                if render_async:
-                    logger.submit(
-                        log_to_wandb,
-                        self.wandb_run,
-                        prev_stats,
-                        results,
-                        g,
-                    )
-                else:
-                    log_to_wandb(
-                        self.wandb_run,
-                        prev_stats,
-                        results,
-                        g,
-                    )
+                        log_generation(*log_args)
 
             results.update(**species_stats)
             print({k: f"{v:.2f}" for k, v in results.items() if is_printable(v)})
@@ -399,5 +392,7 @@ class NEAT:
                 print(f"Resized genome to {population.batched_genome.capacity} nodes")
 
         logger.shutdown(wait=True)
+        if self.monitor is not None:
+            self.monitor.finish()
         # return the population when done
         return population

@@ -1,24 +1,22 @@
 """Evolve a flocking policy for EvoJAX's boids task.
 
     uv run examples/boids.py --generations 100
-    uv run examples/boids.py --wandb-project turbo-neat
+    uv run examples/boids.py --monitor
 
-Rendering the network after each improvement needs the graphviz `dot` binary.
+Start the monitor first with `uv run turbo-neat-monitor`.
 """
 
 import argparse
-import os
 
-import wandb
-from evojax.task.flocking import FlockingTask, render_single
+from evojax.task.flocking import FlockingTask
 
-import neat_jax.activations as act
-from neat_jax.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
-from neat_jax.fitness import make_fitness_fn
-from neat_jax.neat import NEAT
-from neat_jax.species import make_improvement_stagnation_fn
+import neat.activations as act
+from monitor import DEFAULT_URL, Episode, Monitor
+from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
+from neat.fitness import make_fitness_fn
+from neat.neat import NEAT
+from neat.species import make_improvement_stagnation_fn
 
-LOG_DIR = "./logs"
 NUM_STEPS = 100
 
 
@@ -90,15 +88,9 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
     )
 
 
-def render_fn(state):
-    """Turn the frames of one test episode into a gif for wandb."""
-    os.makedirs(LOG_DIR, exist_ok=True)
-    gif_file = os.path.join(LOG_DIR, "flocking.gif")
-    screens = [render_single(state.state[i]) for i in range(state.obs.shape[0])]
-    screens[0].save(
-        gif_file, save_all=True, append_images=screens[1:], duration=40, loop=0
-    )
-    return wandb.Video(gif_file)
+def episode_fn(state):
+    """One test episode as raw boid states (x, y, theta), for the monitor to draw."""
+    return Episode("boids", boids=state.state)
 
 
 def main():
@@ -108,7 +100,12 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=100)
     parser.add_argument(
-        "--wandb-project", default=None, help="log metrics and episode gifs to wandb"
+        "--monitor",
+        nargs="?",
+        const=DEFAULT_URL,
+        default=None,
+        metavar="URL",
+        help=f"log to a turbo-neat monitor (default {DEFAULT_URL})",
     )
     args = parser.parse_args()
 
@@ -119,9 +116,9 @@ def main():
         config=make_config(train_task.obs_shape[0], train_task.act_shape[0]),
         fitness_fn=make_fitness_fn(task=train_task, num_steps=NUM_STEPS),
         baseline_test_fn=make_fitness_fn(task=test_task, num_steps=NUM_STEPS),
-        wandb_project=args.wandb_project,
+        monitor=Monitor(args.monitor, project="boids") if args.monitor else None,
     )
-    neat.run(seed=args.seed, num_generations=args.generations, render_fn=render_fn)
+    neat.run(seed=args.seed, num_generations=args.generations, episode_fn=episode_fn)
 
 
 if __name__ == "__main__":

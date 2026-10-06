@@ -6,8 +6,8 @@ import jax
 import jax.numpy as jnp
 from evojax.task.base import VectorizedTask
 
-from neat_jax.genome import Genome, forward
-from neat_jax.utils import apply
+from neat.genome import Genome, forward
+from neat.utils import apply
 
 
 @jax.tree_util.register_dataclass

@@ -29,7 +29,7 @@ def apply_where(tree: T, fn: Callable[..., T], mask: jax.Array, *args, **kwargs)
 
 def apply(tree: Any, fn: Callable[..., R], *args, **kwargs) -> R:
     """Apply a function to a batch of genomes
-     This will usually be a function from neat_jax.genome that takes a single genome
+     This will usually be a function from neat.genome that takes a single genome
 
     Additional arguments can be passed via args and kwargs:
      * args are vmapped
