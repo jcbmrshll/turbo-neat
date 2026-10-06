@@ -23,7 +23,10 @@ class MutationConfig:
     allow_output_bias_mutation: bool = False
     allow_input_act_mutation: bool = False
     allow_input_bias_mutation: bool = False
-    learning_rate: float = 0.0  # only used for backprop neat
+    # only used for backprop neat
+    learning_rate: float = 0.0
+    backprop_steps: int = 1  # gradient steps per generation
+    max_grad_norm: Optional[float] = None  # per-genome gradient clipping, if set
 
 
 @dataclass
@@ -80,8 +83,7 @@ class NEATConfig:
     # selection
     selection_config: SelectionConfig
 
-    @property
-    def __dict__(self) -> Dict:
+    def to_dict(self) -> Dict:
         return {
             "mutation_config": self.mutation_config.__dict__,
             "selection_config": self.selection_config.__dict__,

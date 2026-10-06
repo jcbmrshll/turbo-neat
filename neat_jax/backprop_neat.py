@@ -1,17 +1,86 @@
+from dataclasses import replace
 from functools import partial
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
-import chex
 import jax
+import jax.numpy as jnp
 import wandb
 
+from neat_jax.activations import ActivationSelector
 from neat_jax.config import NEATConfig
-from neat_jax.genome import Genome
-from neat_jax.neat import NEAT, FitnessFn
+from neat_jax.genome import Genome, prepare_for_inference
+from neat_jax.neat import NEAT, FitnessFn, evolve_one_generation, test_against_baseline
 from neat_jax.population import Population
 
-# returns grads and fitness (-loss)
-BackpropFn = Callable[[chex.PRNGKey, Genome, Dict], Tuple[chex.ArrayTree, chex.Array]]
+# called like a FitnessFn on a fresh batch of data; returns fitness (-loss) and
+# (weight grads, bias grads) of the loss for each genome
+BackpropFn = Callable[..., Tuple[jax.Array, Tuple[jax.Array, jax.Array]]]
+
+# fitness given to a genome whose loss is no longer finite
+DIVERGED_FITNESS = -1e6
+
+
+def gradient_step(
+    genome: Genome,
+    weight_grads: jax.Array,
+    bias_grads: jax.Array,
+    learning_rate: float,
+    max_grad_norm: Optional[float],
+) -> Genome:
+    """Take one gradient descent step on every genome in a batch."""
+    weight_grads = jnp.nan_to_num(weight_grads)
+    bias_grads = jnp.nan_to_num(bias_grads)
+    if max_grad_norm is not None:
+        # clip the gradient norm of each genome separately
+        norm = jnp.sqrt(
+            jnp.sum(weight_grads**2, axis=-1) + jnp.sum(bias_grads**2, axis=-1)
+        )
+        scale = jnp.minimum(1.0, max_grad_norm / (norm + 1e-8))[..., None]
+        weight_grads = weight_grads * scale
+        bias_grads = bias_grads * scale
+    return replace(
+        genome,
+        graph=replace(
+            genome.graph, weights=genome.graph.weights - learning_rate * weight_grads
+        ),
+        node_biases=genome.node_biases - learning_rate * bias_grads,
+    )
+
+
+def evaluate_and_train(
+    rng: jax.Array,
+    population: Population,
+    backprop_fn: BackpropFn,
+    learning_rate: float,
+    num_steps: int,
+    max_grad_norm: Optional[float],
+    activation_selector: ActivationSelector,
+) -> Population:
+    """Train the weights and biases of every genome by gradient descent, then score
+    the trained genomes on a fresh batch.
+
+    The trained weights are kept (and inherited), so the population's weights improve
+    across generations as well as within them."""
+    population = replace(
+        population, batched_genome=prepare_for_inference(population.batched_genome)
+    )
+    genome = population.batched_genome
+    train_rng, eval_rng = jax.random.split(rng)
+
+    def train_step(genome: Genome, rng: jax.Array) -> Tuple[Genome, None]:
+        _, (weight_grads, bias_grads) = backprop_fn(
+            rng=rng, genome=genome, activation_selector=activation_selector
+        )
+        return gradient_step(
+            genome, weight_grads, bias_grads, learning_rate, max_grad_norm
+        ), None
+
+    genome, _ = jax.lax.scan(train_step, genome, jax.random.split(train_rng, num_steps))
+    fitnesses, _ = backprop_fn(
+        rng=eval_rng, genome=genome, activation_selector=activation_selector
+    )
+    fitnesses = jnp.where(jnp.isfinite(fitnesses), fitnesses, DIVERGED_FITNESS)
+    return replace(population, batched_genome=replace(genome, fitness=fitnesses))
 
 
 class BackpropNEAT(NEAT):
@@ -27,81 +96,45 @@ class BackpropNEAT(NEAT):
         self.config = config
         self.activation_selector = config.genome_config.activation_selector
         if wandb_project is not None:
-            self.wandb_run = wandb.init(project=wandb_project, config=config.__dict__)
+            self.wandb_run = wandb.init(project=wandb_project, config=config.to_dict())
         else:
             self.wandb_run = None
-
-        self.evaluate_population = jax.jit(
-            partial(self.evaluate, fitness_fn=backprop_fn)
-        )
-        self.evolve = jax.jit(partial(self.evolve_one_generation))
-        if test_fn is not None:
-            self.test_baseline = jax.jit(
-                partial(self.test_against_baseline, test_fn=test_fn)
-            )
-        else:
-            self.test_baseline = None
-
-        self.test_champion = None
 
         if config.mutation_config.mutate_weight_prob > 0:
             print(
                 "Mutate weight probability is greater than 0. This is not supported by backprop NEAT. Setting mutate_weight_prob to 0."
             )
-            self.config.mutation_config.mutate_weight_prob = 0
+            self.config.mutation_config.mutate_weight_prob = 0.0
         if config.mutation_config.mutate_bias_prob > 0:
             print(
                 "Mutate bias probability is greater than 0. This is not supported by backprop NEAT. Setting mutate_bias_prob to 0."
             )
-            self.config.mutation_config.mutate_bias_prob = 0
+            self.config.mutation_config.mutate_bias_prob = 0.0
         if config.mutation_config.learning_rate <= 0:
             raise ValueError("Learning rate must be greater than 0 for backprop NEAT")
+        if config.mutation_config.backprop_steps <= 0:
+            raise ValueError("backprop_steps must be greater than 0 for backprop NEAT")
 
-    def one_generation_backprop(
-        self, rng: chex.PRNGKey, population: Population, backprop_fn: FitnessFn
-    ) -> Population:
-        """Evolve the population by one generation"""
-        # Prepare genomes for crossover
-        population = population.replace(
-            batched_genome=population.batched_genome.prepare_for_crossover()
+        self.evaluate_population = jax.jit(
+            partial(
+                evaluate_and_train,
+                backprop_fn=backprop_fn,
+                learning_rate=config.mutation_config.learning_rate,
+                num_steps=config.mutation_config.backprop_steps,
+                max_grad_norm=config.mutation_config.max_grad_norm,
+                activation_selector=self.activation_selector,
+            )
         )
-        # create next generation
-        selection_rng, rng = jax.random.split(rng)
-        population = jax.lax.cond(
-            population.generation == 0,
-            lambda _: population,
-            lambda _: population.create_next_generation(
-                selection_rng,
-                selection_config=self.config.selection_config,
-                mutation_config=self.config.mutation_config,
-                genome_config=self.config.genome_config,
-            ),
-            operand=None,
-        )
-        # topologically sort genomes to prepare for inference
-        population = population.replace(
-            batched_genome=population.batched_genome.prepare_for_inference()
-        )
-        genome = population.batched_genome
-        # Evaluate fitness of population
-        fitness_rng, rng = jax.random.split(rng)
-        fitnesses, grads = backprop_fn(
-            rng=fitness_rng, genome=genome, activation_selector=self.activation_selector
-        )
-        # assumed to be weight grads, bias grads
-        wgrads, bgrads = grads[0], grads[1]
-        weights = (
-            genome.graph.weights - self.config.mutation_config.learning_rate * wgrads
-        )
-        biases = genome.node_biases - self.config.mutation_config.learning_rate * bgrads
-        genome = genome.replace(
-            graph=genome.graph.replace(weights=weights),
-            node_biases=biases,
-            fitness=fitnesses,
-        )
+        self.evolve = jax.jit(partial(evolve_one_generation, config=config))
+        if test_fn is not None:
+            self.test_baseline = jax.jit(
+                partial(
+                    test_against_baseline,
+                    test_fn=test_fn,
+                    activation_selector=self.activation_selector,
+                )
+            )
+        else:
+            self.test_baseline = None
 
-        population = population.replace(
-            batched_genome=genome, generation=population.generation + 1
-        )
-
-        return population
+        self.test_champion = None
