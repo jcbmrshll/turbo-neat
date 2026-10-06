@@ -1,9 +1,11 @@
 from functools import partial
-from typing import Callable
+from typing import Any, Callable, TypeVar
 
-import chex
 import jax
 import jax.numpy as jnp
+
+T = TypeVar("T")
+R = TypeVar("R")
 
 
 def mask_data(x, y, mask):
@@ -12,9 +14,7 @@ def mask_data(x, y, mask):
     return jnp.where(mask, x, y)
 
 
-def apply_where(
-    tree: chex.ArrayTree, fn: Callable, mask: chex.Array, *args, **kwargs
-) -> chex.ArrayTree:
+def apply_where(tree: T, fn: Callable[..., T], mask: jax.Array, *args, **kwargs) -> T:
     """Apply a vmapped function conditionally to a batched tree
 
     Additional arguments can be passed via args and kwargs:
@@ -27,9 +27,9 @@ def apply_where(
     return jax.tree.map(mask_fn, vmapped_fn(tree, *args), tree)
 
 
-def apply(tree: chex.ArrayTree, fn: Callable, *args, **kwargs) -> chex.ArrayTree:
+def apply(tree: Any, fn: Callable[..., R], *args, **kwargs) -> R:
     """Apply a function to a batch of genomes
-     This will usually be an unbound method of Genome
+     This will usually be a function from neat_jax.genome that takes a single genome
 
     Additional arguments can be passed via args and kwargs:
      * args are vmapped

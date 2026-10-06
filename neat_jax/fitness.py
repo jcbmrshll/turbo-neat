@@ -1,30 +1,31 @@
+from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, Protocol, Tuple
 
-import chex
 import jax
 import jax.numpy as jnp
-from chex import dataclass
 from evojax.task.base import VectorizedTask
 
-from neat_jax.genome import Genome, apply
+from neat_jax.genome import Genome, forward
+from neat_jax.utils import apply
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class FitnessState:
-    task_state: chex.Array
-    reward: chex.Array
+    task_state: jax.Array
+    reward: jax.Array
 
 
 def fitness(
     step_fn: Callable,
     reset_fn: Callable,
-    rng: chex.PRNGKey,
+    rng: jax.Array,
     genome: Genome,
     num_steps: int,
     frames_len: int,
     **kwargs,
-) -> float:
+) -> Tuple[jax.Array, Any]:
     task_state = reset_fn(jax.random.split(rng, genome.batch_size))
     state = FitnessState(
         task_state=task_state,
@@ -32,7 +33,7 @@ def fitness(
     )
 
     def game_step(state, _):
-        actions = apply(genome, Genome.forward, state.task_state.obs, **kwargs)
+        actions = apply(genome, forward, state.task_state.obs, **kwargs)
         task_state, rewards, _ = step_fn(state.task_state, actions)
         return FitnessState(
             task_state=task_state, reward=state.reward + rewards
@@ -42,17 +43,28 @@ def fitness(
     return state.reward, jax.tree.map(lambda x: x[:frames_len, 0], task_state_frames)
 
 
+class TwoPlayerTask(Protocol):
+    """A task stepped with one action per side, e.g. a self-play environment."""
+
+    def reset(self, key: jax.Array, /) -> Any: ...
+
+    def step_2p(
+        self, state: Any, action_left: jax.Array, action_right: jax.Array, /
+    ) -> Tuple[Any, jax.Array, jax.Array, jax.Array]: ...
+
+
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class FitnessState2p:
-    task_state: chex.Array
-    reward_left: chex.Array
-    reward_right: chex.Array
+    task_state: jax.Array
+    reward_left: jax.Array
+    reward_right: jax.Array
 
 
 def fitness_2p(
     step_fn: Callable,
     reset_fn: Callable,
-    rng: chex.PRNGKey,
+    rng: jax.Array,
     genome: Genome,
     steps_per_round: int,
     num_rounds: int,
@@ -79,11 +91,9 @@ def fitness_2p(
         )
 
         def game_step(_, state):
-            action_left = apply(
-                idxd_left, Genome.forward, state.task_state.obs_left, **kwargs
-            )
+            action_left = apply(idxd_left, forward, state.task_state.obs_left, **kwargs)
             action_right = apply(
-                idxd_right, Genome.forward, state.task_state.obs_right, **kwargs
+                idxd_right, forward, state.task_state.obs_right, **kwargs
             )
             task_state, rewards_left, rewards_right, _ = step_fn(
                 state.task_state, action_left, action_right
@@ -113,7 +123,7 @@ def fitness_2p(
 def fitness_h2h(
     step_fn: Callable,
     reset_fn: Callable,
-    rng: chex.PRNGKey,
+    rng: jax.Array,
     genome_1: Genome,
     genome_2: Genome,
     num_steps: int,
@@ -129,12 +139,8 @@ def fitness_h2h(
     )
 
     def game_step(_, state):
-        action_left = apply(
-            genome_1, Genome.forward, state.task_state.obs_left, **kwargs
-        )
-        action_right = apply(
-            genome_2, Genome.forward, state.task_state.obs_right, **kwargs
-        )
+        action_left = apply(genome_1, forward, state.task_state.obs_left, **kwargs)
+        action_right = apply(genome_2, forward, state.task_state.obs_right, **kwargs)
         task_state, rewards_left, rewards_right, _ = step_fn(
             state.task_state, action_left, action_right
         )
@@ -166,7 +172,7 @@ def make_fitness_fn(
 
 
 def make_2p_fitness_fn(
-    task: VectorizedTask, steps_per_round: int, num_rounds: int
+    task: TwoPlayerTask, steps_per_round: int, num_rounds: int
 ) -> Callable:
     assert num_rounds > 0, "num_rounds must be greater than 0"
     assert steps_per_round > 0, "steps_per_round must be greater than 0"
@@ -179,7 +185,7 @@ def make_2p_fitness_fn(
     )
 
 
-def make_h2h_fitness_fn(task: VectorizedTask, num_steps: int) -> Callable:
+def make_h2h_fitness_fn(task: TwoPlayerTask, num_steps: int) -> Callable:
     assert num_steps > 0, "num_steps must be greater than 0"
     return partial(
         fitness_h2h, step_fn=task.step_2p, reset_fn=task.reset, num_steps=num_steps

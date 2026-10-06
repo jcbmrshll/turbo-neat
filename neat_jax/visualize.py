@@ -13,15 +13,18 @@ def visualize_genome_as_nn(
     input_labels: Optional[List[str]] = None,
     output_labels: Optional[List[str]] = None,
     filename="neural_network",
-) -> graphviz.Digraph:
+) -> None:
     """Visualize a genome as a neural network using graphviz
     assumes that the graph is in topological order
     """
 
     dot = graphviz.Digraph("neural network", comment="")
     dot.attr(rankdir="LR", size="10,!", ratio="fill", bgcolor="transparent")
-    inputs = genome.input_idxs.tolist()
-    outputs = genome.output_idxs.tolist()
+    inputs = list(range(genome.input_size))
+    outputs = list(range(genome.input_size, genome.input_size + genome.output_size))
+    # fall back to node ids when no labels are given
+    input_labels = input_labels or [str(s) for s in inputs]
+    output_labels = output_labels or [str(s) for s in outputs]
 
     weight_min = jnp.abs(genome.graph.weights).min().item()
     weight_max = jnp.abs(genome.graph.weights).max().item()
@@ -46,7 +49,8 @@ def visualize_genome_as_nn(
             ),
         )
 
-    with dot.subgraph() as sub:
+    # subgraph() only returns None when it is passed a graph
+    with dot.subgraph() as sub:  # pyright: ignore[reportOptionalContextManager]
         sub.attr(rank="same")
         for i, s in enumerate(inputs):
             sub.node(
@@ -59,7 +63,8 @@ def visualize_genome_as_nn(
                 fontsize="15",
             )
 
-    with dot.subgraph() as sub:
+    # subgraph() only returns None when it is passed a graph
+    with dot.subgraph() as sub:  # pyright: ignore[reportOptionalContextManager]
         sub.attr(rank="same")
         for i, s in enumerate(outputs):
             sub.node(
