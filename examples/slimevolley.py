@@ -8,29 +8,26 @@ The population of 1000 wants a GPU; expect the score against the baseline to cli
 from about -10 to above -1 within the first 50 generations.
 
     uv run examples/slimevolley.py --generations 100
-    uv run examples/slimevolley.py --wandb-project turbo-neat
+    uv run examples/slimevolley.py --monitor
 
-Rendering the network after each improvement needs the graphviz `dot` binary.
+Start the monitor first with `uv run turbo-neat-monitor`.
 """
 
 import argparse
-import os
 from dataclasses import dataclass
 from typing import Tuple
 
 import jax
 import jax.numpy as jnp
-import wandb
 from evojax.task import slimevolley
 from evojax.task.slimevolley import Game, GameState, SlimeVolley
 
-import neat_jax.activations as act
-from neat_jax.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
-from neat_jax.fitness import make_2p_fitness_fn, make_fitness_fn, make_h2h_fitness_fn
-from neat_jax.neat import NEAT
-from neat_jax.species import make_remove_last_if_stagnant_and_full_stagnation_fn
-
-LOG_DIR = "./logs"
+import neat.activations as act
+from monitor import DEFAULT_URL, Episode, Monitor
+from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
+from neat.fitness import make_2p_fitness_fn, make_fitness_fn, make_h2h_fitness_fn
+from neat.neat import NEAT
+from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
 
 
 def get_random_ball_v(key: jax.Array) -> Tuple[jax.Array, jax.Array]:
@@ -183,18 +180,16 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
     )
 
 
-def render_fn(state):
-    """Turn the frames of one game against the baseline policy into a gif for wandb."""
-    os.makedirs(LOG_DIR, exist_ok=True)
-    gif_file = os.path.join(LOG_DIR, "slimevolley.gif")
-    screens = [
-        SlimeVolley.render(jax.tree.map(lambda x: x[i], state))
-        for i in range(state.obs.shape[0])
+def episode_fn(state):
+    """One game against the baseline policy as raw positions, for the monitor to draw:
+    the ball's x, y, r and each slime's x, y, r, direction and lives."""
+    game = state.game_state
+    agents = [
+        jnp.stack([a.x, a.y, a.r, a.direction, a.life], axis=-1)
+        for a in (game.agent_left, game.agent_right)
     ]
-    screens[0].save(
-        gif_file, save_all=True, append_images=screens[1:], duration=40, loop=0
-    )
-    return wandb.Video(gif_file)
+    ball = jnp.stack([game.ball.x, game.ball.y, game.ball.r], axis=-1)
+    return Episode("slimevolley", ball=ball, left=agents[0], right=agents[1])
 
 
 def main():
@@ -204,7 +199,12 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=100)
     parser.add_argument(
-        "--wandb-project", default=None, help="log metrics and episode gifs to wandb"
+        "--monitor",
+        nargs="?",
+        const=DEFAULT_URL,
+        default=None,
+        metavar="URL",
+        help=f"log to a turbo-neat monitor (default {DEFAULT_URL})",
     )
     args = parser.parse_args()
 
@@ -217,9 +217,9 @@ def main():
         fitness_fn=make_2p_fitness_fn(selfplay, steps_per_round=500, num_rounds=4),
         h2h_test_fn=make_h2h_fitness_fn(selfplay, num_steps=1000),
         baseline_test_fn=make_fitness_fn(baseline, num_steps=1000, frames_len=300),
-        wandb_project=args.wandb_project,
+        monitor=Monitor(args.monitor, project="slimevolley") if args.monitor else None,
     )
-    neat.run(seed=args.seed, num_generations=args.generations, render_fn=render_fn)
+    neat.run(seed=args.seed, num_generations=args.generations, episode_fn=episode_fn)
 
 
 if __name__ == "__main__":

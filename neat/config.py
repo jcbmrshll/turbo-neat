@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from neat_jax.activations import (
+from neat.activations import (
     ActivationFn,
     ActivationSelector,
     make_activation_selector_fn,

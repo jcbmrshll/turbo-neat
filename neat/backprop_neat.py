@@ -4,13 +4,13 @@ from typing import Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import wandb
 
-from neat_jax.activations import ActivationSelector
-from neat_jax.config import NEATConfig
-from neat_jax.genome import Genome, prepare_for_inference
-from neat_jax.neat import NEAT, FitnessFn, evolve_one_generation, test_against_baseline
-from neat_jax.population import Population
+from monitor import Monitor
+from neat.activations import ActivationSelector
+from neat.config import NEATConfig
+from neat.genome import Genome, prepare_for_inference
+from neat.neat import NEAT, FitnessFn, evolve_one_generation, test_against_baseline
+from neat.population import Population
 
 # called like a FitnessFn on a fresh batch of data; returns fitness (-loss) and
 # (weight grads, bias grads) of the loss for each genome
@@ -91,14 +91,11 @@ class BackpropNEAT(NEAT):
         config: NEATConfig,
         backprop_fn: BackpropFn,
         test_fn: Optional[FitnessFn] = None,
-        wandb_project: Optional[str] = None,
+        monitor: Optional[Monitor] = None,
     ):
         self.config = config
         self.activation_selector = config.genome_config.activation_selector
-        if wandb_project is not None:
-            self.wandb_run = wandb.init(project=wandb_project, config=config.to_dict())
-        else:
-            self.wandb_run = None
+        self.monitor = monitor
 
         if config.mutation_config.mutate_weight_prob > 0:
             print(

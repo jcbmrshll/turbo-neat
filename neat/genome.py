@@ -8,8 +8,8 @@ import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 
-from neat_jax.activations import ActivationSelector
-from neat_jax.utils import apply
+from neat.activations import ActivationSelector
+from neat.utils import apply
 
 
 @jax.tree_util.register_dataclass
