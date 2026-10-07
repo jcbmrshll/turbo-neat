@@ -64,7 +64,9 @@ def fitness(
 
     An episode ends at the task's first done, like evojax's rollouts: the reward
     stops counting and the task state is held there, rather than playing on from
-    the start the task resets to."""
+    the start the task resets to. So done is the task's to decide: a task that
+    should be scored through its resets (a new round, say) shouldn't report done
+    for them."""
 
     def episode(rng, record):
         task_state = reset_fn(jax.random.split(rng, genome.batch_size))
