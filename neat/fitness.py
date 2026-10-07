@@ -34,8 +34,8 @@ def _episode_major(frames: Any) -> Any:
 class FitnessState:
     task_state: jax.Array
     reward: jax.Array
-    # false once a genome's episode is done
-    alive: jax.Array
+    # how many times each genome's task has reset (reported done) while scoring
+    resets: jax.Array
 
 
 def _keep_where(mask: jax.Array, new: Any, old: Any) -> Any:
@@ -55,6 +55,7 @@ def fitness(
     num_steps: int,
     frames_len: int,
     num_episodes: int = 1,
+    max_resets: Optional[int] = 0,
     record: bool = False,
     **kwargs,
 ) -> Tuple[jax.Array, Any]:
@@ -62,31 +63,37 @@ def fitness(
     from different starts, and from the first of them either a Recording of every
     genome's episode (if record) or the first genome's first frames_len frames.
 
-    An episode ends at the task's first done, like evojax's rollouts: the reward
-    stops counting and the task state is held there, rather than playing on from
-    the start the task resets to. So done is the task's to decide: a task that
-    should be scored through its resets (a new round, say) shouldn't report done
-    for them."""
+    Each done the task reports is a reset: the task starts over from a new state.
+    Reward counts until the task has reset more than max_resets times, after which
+    the task state is held where it was, rather than playing on from a new start.
+    So 0 scores one episode, like evojax's rollouts; k lets an episode use k extra
+    starts, like lives; None scores straight through every reset, for tasks whose
+    done just starts a new round."""
+
+    # None never runs out of resets
+    limit = jnp.iinfo(jnp.int32).max if max_resets is None else max_resets
 
     def episode(rng, record):
         task_state = reset_fn(jax.random.split(rng, genome.batch_size))
         state = FitnessState(
             task_state=task_state,
             reward=jnp.zeros(genome.batch_size, dtype=jnp.float32),
-            alive=jnp.ones(genome.batch_size, dtype=bool),
+            resets=jnp.zeros(genome.batch_size, dtype=jnp.int32),
         )
 
         def game_step(state, _):
             actions = apply(genome, forward, state.task_state.obs, **kwargs)
             task_state, rewards, done = step_fn(state.task_state, actions)
-            reward = state.reward + jnp.where(state.alive, rewards, 0)
-            alive = state.alive & ~done.astype(bool)
-            # the step that ends an episode resets the task; keep its last state
-            task_state = _keep_where(alive, task_state, state.task_state)
+            # the step that resets the task still counts
+            counted = state.resets <= limit
+            reward = state.reward + jnp.where(counted, rewards, 0)
+            resets = state.resets + (counted & done.astype(bool))
+            # past the last counted reset, keep the task's last state
+            task_state = _keep_where(resets <= limit, task_state, state.task_state)
             # every genome's states if recording, else just the first genome's
             frame = task_state if record else jax.tree.map(lambda x: x[0], task_state)
             return FitnessState(
-                task_state=task_state, reward=reward, alive=alive
+                task_state=task_state, reward=reward, resets=resets
             ), frame
 
         state, frames = jax.lax.scan(game_step, state, jnp.zeros(num_steps))
@@ -239,12 +246,15 @@ def make_fitness_fn(
     num_steps: int,
     frames_len: Optional[int] = None,
     num_episodes: int = 1,
+    max_resets: Optional[int] = 0,
     record: bool = False,
 ) -> Callable:
-    """Fitness is the total reward over num_steps, averaged over num_episodes from
-    different starts; see fitness() for the auxiliary data."""
+    """Fitness is the total reward over num_steps, up to max_resets resets of the
+    task, averaged over num_episodes from different starts; see fitness() for the
+    resets and the auxiliary data."""
     assert num_steps > 0, "num_steps must be greater than 0"
     assert num_episodes > 0, "num_episodes must be greater than 0"
+    assert max_resets is None or max_resets >= 0, "max_resets must be at least 0"
     if frames_len is None:
         frames_len = num_steps
     frames_len = min(frames_len, num_steps)
@@ -255,6 +265,7 @@ def make_fitness_fn(
         num_steps=num_steps,
         frames_len=frames_len,
         num_episodes=num_episodes,
+        max_resets=max_resets,
         record=record,
     )
 
