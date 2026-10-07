@@ -3,6 +3,9 @@
     monitor = Monitor("http://localhost:8008", project="slimevolley")
     monitor.start(config=config.to_dict())
     monitor.log(step, {"max_fitness": 3.2, "episode": Episode("boids", boids=states)})
+    monitor.log(step, {"members": Members(ids, parents, species, fitness, champion)})
+    monitor.log(step, {"networks": Networks(ids, from_nodes, to_nodes, weights, ...)})
+    monitor.log(step, {"episodes": Episodes(Episode("boids", boids=...), players)})
     monitor.finish()
 
 Logging never raises: if the server is down the run keeps training and the
@@ -37,6 +40,115 @@ class Episode:
     def to_bytes(self) -> bytes:
         buf = io.BytesIO()
         np.savez_compressed(buf, **self.data)
+        return buf.getvalue()
+
+
+class Episodes:
+    """The episodes a generation's members played for their fitness: an Episode
+    whose arrays have a leading episode axis, and the genome ids playing each
+    episode, shape (episodes, players). Floats are kept as float16, which is plenty
+    to draw them and halves a generation's worth."""
+
+    def __init__(self, episode: Episode, players: Any):
+        if "players" in episode.data:
+            raise ValueError("an episode logged with Episodes can't have 'players'")
+        self.episode = episode
+        self.players = players
+
+    def to_bytes(self) -> bytes:
+        data = {
+            k: v.astype(np.float16) if np.issubdtype(v.dtype, np.floating) else v
+            for k, v in self.episode.data.items()
+        }
+        buf = io.BytesIO()
+        np.savez_compressed(
+            buf, players=np.asarray(self.players, dtype=np.int32), **data
+        )
+        return buf.getvalue()
+
+
+class Members:
+    """Every member of one generation, for the leaderboard and lineage views: their
+    genome ids, their parents' ids (shape (n, 2), the fitter parent first, -1 for
+    none), species ids and fitness, plus the champion's genome id.
+
+    Arrays may still be on the device; they're copied off it when logged, so a
+    background logging thread does the copy."""
+
+    def __init__(
+        self,
+        ids: Any,
+        parents: Any,
+        species: Any,
+        fitness: Any,
+        champion: Optional[Any] = None,
+    ):
+        self.ids = ids
+        self.parents = parents
+        self.species = species
+        self.fitness = fitness
+        self.champion = champion
+
+    def to_dict(self) -> Dict[str, Any]:
+        fitness = np.asarray(self.fitness, dtype=np.float32)
+        return {
+            "ids": np.asarray(self.ids).astype(int).tolist(),
+            "parents": np.asarray(self.parents).astype(int).tolist(),
+            "species": np.asarray(self.species).astype(int).tolist(),
+            # 6 significant digits keeps float32 noise out of the file; JSON has no
+            # NaN or inf, so a diverged fitness is null
+            "fitness": [float(f"{f:.6g}") if np.isfinite(f) else None for f in fitness],
+            "champion": None if self.champion is None else int(self.champion),
+        }
+
+
+class Networks:
+    """Every member's network in one generation, for the lineage view: genome ids,
+    and the batched arrays of their condensed graphs, of which the first
+    num_connections connections and num_nodes nodes are each genome's. Packed as
+    described in monitor.networks.
+
+    Like Members, the arrays are copied off the device when logged."""
+
+    def __init__(
+        self,
+        ids: Any,
+        from_nodes: Any,
+        to_nodes: Any,
+        weights: Any,
+        num_connections: Any,
+        activation_ids: Any,
+        biases: Any,
+        num_nodes: Any,
+    ):
+        self.ids = ids
+        self.from_nodes = from_nodes
+        self.to_nodes = to_nodes
+        self.weights = weights
+        self.num_connections = num_connections
+        self.activation_ids = activation_ids
+        self.biases = biases
+        self.num_nodes = num_nodes
+
+    def to_bytes(self) -> bytes:
+        num_connections = np.asarray(self.num_connections)
+        num_nodes = np.asarray(self.num_nodes)
+        capacity = np.asarray(self.from_nodes).shape[1]
+        # row-major masking keeps each genome's entries together, in order
+        conns = np.arange(capacity) < num_connections[:, None]
+        nodes = np.arange(capacity) < num_nodes[:, None]
+        buf = io.BytesIO()
+        np.savez_compressed(
+            buf,
+            ids=np.asarray(self.ids, dtype=np.int32),
+            num_connections=num_connections.astype(np.int32),
+            from_nodes=np.asarray(self.from_nodes)[conns].astype(np.int32),
+            to_nodes=np.asarray(self.to_nodes)[conns].astype(np.int32),
+            weights=np.asarray(self.weights)[conns].astype(np.float32),
+            num_nodes=num_nodes.astype(np.int32),
+            activation_ids=np.asarray(self.activation_ids)[nodes].astype(np.int16),
+            biases=np.asarray(self.biases)[nodes].astype(np.float32),
+        )
         return buf.getvalue()
 
 
@@ -126,6 +238,29 @@ class Monitor:
             number = to_number(value)
             if number is not None:
                 metrics[key] = number
+                continue
+            if isinstance(value, Members):
+                self._post_json(
+                    f"/api/runs/{self.run_id}/members",
+                    {"step": step, **value.to_dict()},
+                )
+                continue
+            if isinstance(value, Networks):
+                self._request(
+                    f"/api/runs/{self.run_id}/networks?step={step}",
+                    value.to_bytes(),
+                    content_type="application/x-npz",
+                    timeout=60,
+                )
+                continue
+            if isinstance(value, Episodes):
+                self._request(
+                    f"/api/runs/{self.run_id}/member_episodes"
+                    f"?step={step}&env={quote(value.episode.env)}",
+                    value.to_bytes(),
+                    content_type="application/x-npz",
+                    timeout=60,
+                )
                 continue
             if isinstance(value, Episode):
                 self._request(

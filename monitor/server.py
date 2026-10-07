@@ -8,11 +8,19 @@ Everything lives on disk under the run directory, one folder per run:
     <dir>/<run id>/meta.json      project, name, config, timestamps, status
     <dir>/<run id>/metrics.jsonl  one {"step": ..., "time": ..., <metrics>} per line
     <dir>/<run id>/media.jsonl    one {"key": ..., "step": ..., "file": ...} per line
+    <dir>/<run id>/members.jsonl  every member of each generation, one line per
+                                  generation (see monitor.lineage)
     <dir>/<run id>/media/         the media files themselves
     <dir>/<run id>/episodes/      raw episode data (.npz), rendered into media/
+    <dir>/<run id>/networks/      every member's network, one .npz per generation
+                                  (see monitor.networks)
+    <dir>/<run id>/member_episodes/  the episodes members played for their fitness,
+                                  <step>-<env>.npz per generation, rendered into
+                                  rendered/ the first time one is asked for
 
 Runs send episodes as raw arrays; the server renders them (monitor.renderers)
 on a background thread, so neither the training run nor the dashboard draws them.
+Members' episodes are far too many to render them all, so they're drawn on demand.
 """
 
 import argparse
@@ -33,7 +41,10 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from monitor.aliases import alias
+from monitor.lineage import Lineage
 from monitor.media import encode_media
+from monitor.networks import describe_network, unpack_network
 from monitor.renderers import RENDERERS
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -69,6 +80,10 @@ class RunStore:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
+        # run id -> its lineage, indexed on first use and kept up to date after
+        self.lineages: Dict[str, Lineage] = {}
+        # members' episodes render one at a time, like the champion's
+        self.render_lock = threading.Lock()
 
     def _dir(self, run_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
@@ -125,13 +140,212 @@ class RunStore:
             meta["step"] = step if meta["step"] is None else max(meta["step"], step)
             self._write_meta(run_dir, meta)
 
-    def add_media(
-        self, run_id: str, key: str, step: int, content_type: str, data: bytes
+    def add_members(self, run_id: str, step: int, body: Dict[str, Any]) -> None:
+        run_dir = self._dir(run_id)
+        if len({len(body[k]) for k in ("ids", "parents", "species", "fitness")}) > 1:
+            raise ValueError("ids, parents, species and fitness differ in length")
+        if any(len(p) != 2 for p in body["parents"]):
+            raise ValueError("parents must be pairs of genome ids")
+        row = {
+            "step": step,
+            "time": time.time(),
+            "champion": body.get("champion"),
+            "ids": body["ids"],
+            "parents": body["parents"],
+            "species": body["species"],
+            "fitness": body["fitness"],
+        }
+        with self.lock:
+            with open(run_dir / "members.jsonl", "a") as f:
+                f.write(json.dumps(row) + "\n")
+            meta = self._read_meta(run_dir)
+            meta["updated"] = row["time"]
+            self._write_meta(run_dir, meta)
+
+    def lineage(self, run_id: str) -> Lineage:
+        """The run's lineage, caught up with everything logged so far. Hold its lock
+        while querying it."""
+        run_dir = self._dir(run_id)
+        with self.lock:
+            if run_id not in self.lineages:
+                self.lineages[run_id] = Lineage(run_dir / "members.jsonl")
+            lineage = self.lineages[run_id]
+        with lineage.lock:
+            lineage.update()
+        return lineage
+
+    def leaderboard(
+        self, run_id: str, scope: str, sort: str, limit: int
     ) -> Dict[str, Any]:
+        lineage = self.lineage(run_id)
+        with lineage.lock:
+            return lineage.leaderboard(scope, sort, limit)
+
+    def champions(self, run_id: str) -> List[Dict[str, Any]]:
+        lineage = self.lineage(run_id)
+        with lineage.lock:
+            return lineage.champions()
+
+    def individual(self, run_id: str, genome_id: int, depth: int) -> Dict[str, Any]:
+        lineage = self.lineage(run_id)
+        with lineage.lock:
+            return lineage.individual(genome_id, depth)
+
+    def save_networks(self, run_id: str, step: int, data: bytes) -> None:
+        path = self._dir(run_id) / "networks" / f"{step}.npz"
+        path.parent.mkdir(exist_ok=True)
+        # written aside and moved into place, so a reader never sees half a file
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+
+    def network(
+        self, run_id: str, genome_id: int, step: Optional[int]
+    ) -> Dict[str, Any]:
+        """A member's network in one of its generations (its latest by default), and
+        the generations it has one for."""
+        run_dir = self._dir(run_id)
+        lineage = self.lineage(run_id)
+        with lineage.lock:
+            if not lineage.known(genome_id):
+                raise KeyError(genome_id)
+            born, last = int(lineage.born[genome_id]), int(lineage.last[genome_id])
+        steps = [
+            s
+            for s in range(born, last + 1)
+            if (run_dir / "networks" / f"{s}.npz").exists()
+        ]
+        if not steps:
+            raise KeyError(genome_id)
+        step = steps[-1] if step is None else step
+        if step not in steps:
+            raise KeyError(step)
+        with np.load(run_dir / "networks" / f"{step}.npz", allow_pickle=False) as npz:
+            arrays = unpack_network(npz, genome_id)
+        if arrays is None:
+            raise KeyError(genome_id)
+        genome_config = self._read_meta(run_dir)["config"].get("genome_config", {})
+        network = describe_network(
+            **arrays,
+            input_size=genome_config["input_size"],
+            output_size=genome_config["output_size"],
+            # the config was logged with each activation function by name
+            activation_names=dict(enumerate(genome_config.get("activation_fns", []))),
+            input_labels=genome_config.get("input_labels"),
+            output_labels=genome_config.get("output_labels"),
+        )
+        return {**network, "step": step, "steps": steps}
+
+    def save_member_episodes(
+        self, run_id: str, step: int, env: str, data: bytes
+    ) -> None:
+        path = self._dir(run_id) / "member_episodes" / f"{step}-{env}.npz"
+        path.parent.mkdir(exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+
+    def _member_episode_files(self, run_dir: Path) -> Dict[int, Path]:
+        """step -> that generation's members' episodes"""
+        files = (run_dir / "member_episodes").glob("*.npz")
+        return {int(f.stem.split("-", 1)[0]): f for f in files}
+
+    def member_episodes(
+        self, run_id: str, genome_id: int, step: Optional[int]
+    ) -> Dict[str, Any]:
+        """The episodes a member played in one of its generations (its latest by
+        default), who played them with it, and the generations it has any for."""
+        run_dir = self._dir(run_id)
+        lineage = self.lineage(run_id)
+        with lineage.lock:
+            if not lineage.known(genome_id):
+                raise KeyError(genome_id)
+            born, last = int(lineage.born[genome_id]), int(lineage.last[genome_id])
+        files = self._member_episode_files(run_dir)
+        steps = sorted(s for s in files if born <= s <= last)
+        if not steps:
+            raise KeyError(genome_id)
+        step = steps[-1] if step is None else step
+        if step not in steps:
+            raise KeyError(step)
+        with np.load(files[step], allow_pickle=False) as npz:
+            players = npz["players"]
+        with lineage.lock:
+
+            def player(p: int) -> Dict[str, Any]:
+                if not lineage.known(p):
+                    return {"id": p, "name": None}
+                return {
+                    "id": p,
+                    "name": alias(p, int(lineage.birth_species[p])),
+                }
+
+            episodes = [
+                {
+                    "index": int(i),
+                    "players": [player(int(p)) for p in players[i]],
+                    "seat": int(np.flatnonzero(players[i] == genome_id)[0]),
+                }
+                for i in np.flatnonzero((players == genome_id).any(axis=1))
+            ]
+        return {
+            "step": step,
+            "steps": steps,
+            "env": files[step].stem.split("-", 1)[1],
+            "episodes": episodes,
+        }
+
+    def member_episode_media(self, run_id: str, step: int, index: int) -> Path:
+        """One of a generation's member episodes, rendered (the first time it's
+        asked for) like the champion's."""
+        run_dir = self._dir(run_id)
+        source = self._member_episode_files(run_dir)[step]
+        rendered = run_dir / "member_episodes" / "rendered"
+        cached = list(rendered.glob(f"{step}-{index}.*"))
+        if cached:
+            return cached[0]
+        with self.render_lock:
+            cached = list(rendered.glob(f"{step}-{index}.*"))
+            if cached:
+                return cached[0]
+            with np.load(source, allow_pickle=False) as npz:
+                if not 0 <= index < len(npz["players"]):
+                    raise KeyError(index)
+                data = {
+                    k: npz[k][index].astype(np.float32)
+                    if np.issubdtype(npz[k].dtype, np.floating)
+                    else npz[k][index]
+                    for k in npz.files
+                    if k != "players"
+                }
+            env = source.stem.split("-", 1)[1]
+            media = encode_media(RENDERERS[env](data))
+            if media is None:
+                raise TypeError(f"the {env!r} renderer returned nothing displayable")
+            content_type, body = media
+            rendered.mkdir(exist_ok=True)
+            path = rendered / f"{step}-{index}.{MEDIA_TYPES[content_type]}"
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(body)
+            tmp.replace(path)
+            return path
+
+    def add_media(
+        self,
+        run_id: str,
+        key: str,
+        step: int,
+        content_type: str,
+        data: bytes,
+        env: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Store media; `env` names the environment of a rendered episode."""
         run_dir = self._dir(run_id)
         ext = MEDIA_TYPES[content_type]
         file = f"{_safe(key)}-{step}.{ext}"
         entry = {"key": key, "step": step, "file": file, "time": time.time()}
+        if env is not None:
+            entry["env"] = env
         with self.lock:
             (run_dir / "media" / file).write_bytes(data)
             with open(run_dir / "media.jsonl", "a") as f:
@@ -215,7 +429,7 @@ def render_episode(
         media = encode_media(RENDERERS[env](data))
         if media is None:
             raise TypeError(f"the {env!r} renderer returned nothing displayable")
-        store.add_media(run_id, key, step, *media)
+        store.add_media(run_id, key, step, *media, env=env)
     except Exception as e:
         traceback.print_exc()
         store.add_media_error(run_id, key, step, f"{type(e).__name__}: {e}")
@@ -266,9 +480,76 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(self.store.metrics(run_id, since))
                 case ["api", "runs", run_id, "media"]:
                     self._json(self.store.media(run_id, since))
+                case ["api", "runs", run_id, "champions"]:
+                    self._json(self.store.champions(run_id))
+                case ["api", "runs", run_id, "leaderboard"]:
+                    board = self.store.leaderboard(
+                        run_id,
+                        scope=query.get("scope", ["alive"])[0],
+                        sort=query.get("sort", ["fitness"])[0],
+                        limit=min(int(query.get("limit", ["50"])[0]), 500),
+                    )
+                    self._json(board)
+                case ["api", "runs", run_id, "individuals", genome_id]:
+                    try:
+                        individual = self.store.individual(
+                            run_id,
+                            int(genome_id),
+                            depth=min(int(query.get("depth", ["6"])[0]), 50),
+                        )
+                    except KeyError:
+                        self._error(HTTPStatus.NOT_FOUND, "no such individual")
+                        return
+                    self._json(individual)
+                case ["api", "runs", run_id, "individuals", genome_id, "network"]:
+                    step = query.get("step", [None])[0]
+                    try:
+                        network = self.store.network(
+                            run_id, int(genome_id), None if step is None else int(step)
+                        )
+                    except KeyError:
+                        self._error(HTTPStatus.NOT_FOUND, "no network logged for it")
+                        return
+                    self._json(network)
+                case ["api", "runs", run_id, "individuals", genome_id, "episodes"]:
+                    step = query.get("step", [None])[0]
+                    try:
+                        episodes = self.store.member_episodes(
+                            run_id, int(genome_id), None if step is None else int(step)
+                        )
+                    except KeyError:
+                        self._error(HTTPStatus.NOT_FOUND, "no episodes logged for it")
+                        return
+                    # render its own game now (the first it's seated first in, which
+                    # is the one the dashboard shows), so it's ready sooner
+                    own = [e for e in episodes["episodes"] if e["seat"] == 0]
+                    for episode in own[:1]:
+                        self.renderer.submit(
+                            self.store.member_episode_media,
+                            run_id,
+                            episodes["step"],
+                            episode["index"],
+                        )
+                    self._json(episodes)
+                case ["api", "runs", run_id, "member_episodes", step, index]:
+                    try:
+                        path = self.store.member_episode_media(
+                            run_id, int(step), int(index)
+                        )
+                    except KeyError:
+                        self._error(HTTPStatus.NOT_FOUND, "no such episode")
+                        return
+                    except Exception as e:
+                        traceback.print_exc()
+                        self._error(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            f"couldn't render: {type(e).__name__}: {e}",
+                        )
+                        return
+                    self._file(path)
                 case ["media", run_id, file]:
                     self._file(self.store.media_path(run_id, file))
-                case [] | ["run", _]:
+                case [] | ["run", *_]:
                     # the dashboard routes client-side, so every page is index.html
                     self._file(STATIC_DIR / "index.html")
                 case ["static", file] if (STATIC_DIR / _safe(file)).is_file():
@@ -277,6 +558,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._error(HTTPStatus.NOT_FOUND, "not found")
         except KeyError:
             self._error(HTTPStatus.NOT_FOUND, "no such run")
+        except ValueError as e:
+            self._error(HTTPStatus.BAD_REQUEST, str(e))
 
     def do_POST(self):
         url = urlparse(self.path)
@@ -295,6 +578,28 @@ class Handler(BaseHTTPRequestHandler):
                 case ["api", "runs", run_id, "log"]:
                     body = json.loads(self._body())
                     self.store.log(run_id, int(body["step"]), body["metrics"])
+                    self._json({"ok": True})
+                case ["api", "runs", run_id, "members"]:
+                    body = json.loads(self._body())
+                    self.store.add_members(run_id, int(body["step"]), body)
+                    self._json({"ok": True})
+                case ["api", "runs", run_id, "member_episodes"]:
+                    env = query["env"][0]
+                    if env not in RENDERERS:
+                        known = ", ".join(sorted(RENDERERS))
+                        self._error(
+                            HTTPStatus.BAD_REQUEST,
+                            f"no renderer for env {env!r} (known: {known})",
+                        )
+                        return
+                    self.store.save_member_episodes(
+                        run_id, int(query["step"][0]), env, self._body()
+                    )
+                    self._json({"ok": True})
+                case ["api", "runs", run_id, "networks"]:
+                    self.store.save_networks(
+                        run_id, int(query["step"][0]), self._body()
+                    )
                     self._json({"ok": True})
                 case ["api", "runs", run_id, "media"]:
                     content_type = self.headers.get("Content-Type", "")

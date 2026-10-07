@@ -89,7 +89,8 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
 
 
 def episode_fn(state):
-    """One test episode as raw boid states (x, y, theta), for the monitor to draw."""
+    """An episode as raw boid states (x, y, theta), for the monitor to draw; also
+    packs the members' recorded episodes at once, with a leading episode axis."""
     return Episode("boids", boids=state.state)
 
 
@@ -114,7 +115,10 @@ def main():
 
     neat = NEAT(
         config=make_config(train_task.obs_shape[0], train_task.act_shape[0]),
-        fitness_fn=make_fitness_fn(task=train_task, num_steps=NUM_STEPS),
+        # record every member's episode for the monitor's lineage view
+        fitness_fn=make_fitness_fn(
+            task=train_task, num_steps=NUM_STEPS, record=args.monitor is not None
+        ),
         baseline_test_fn=make_fitness_fn(task=test_task, num_steps=NUM_STEPS),
         monitor=Monitor(args.monitor, project="boids") if args.monitor else None,
     )

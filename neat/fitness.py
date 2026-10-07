@@ -12,6 +12,25 @@ from neat.utils import apply
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
+class Recording:
+    """What a fitness evaluation played, for the monitor: one episode per member (or
+    per game, for two-player tasks).
+
+    frames is the task state at every step, with leading (episode, step) axes, and
+    players holds the batch index of each genome playing each episode, shape
+    (episodes, players)."""
+
+    frames: Any
+    players: jax.Array
+
+
+def _episode_major(frames: Any) -> Any:
+    """Task states stacked by lax.scan, (step, episode, ...), as (episode, step, ...)."""
+    return jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), frames)
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
 class FitnessState:
     task_state: jax.Array
     reward: jax.Array
@@ -24,8 +43,11 @@ def fitness(
     genome: Genome,
     num_steps: int,
     frames_len: int,
+    record: bool = False,
     **kwargs,
 ) -> Tuple[jax.Array, Any]:
+    """Returns the total reward of each genome, and either a Recording of every
+    genome's episode (if record) or the first genome's first frames_len frames."""
     task_state = reset_fn(jax.random.split(rng, genome.batch_size))
     state = FitnessState(
         task_state=task_state,
@@ -40,6 +62,9 @@ def fitness(
         ), task_state
 
     state, task_state_frames = jax.lax.scan(game_step, state, jnp.zeros(num_steps))
+    if record:
+        players = jnp.arange(genome.batch_size)[:, None]
+        return state.reward, Recording(_episode_major(task_state_frames), players)
     return state.reward, jax.tree.map(lambda x: x[:frames_len, 0], task_state_frames)
 
 
@@ -68,11 +93,14 @@ def fitness_2p(
     genome: Genome,
     steps_per_round: int,
     num_rounds: int,
+    record: bool = False,
     **kwargs,
 ):
+    """Returns each genome's total reward over num_rounds rounds of games against
+    random opponents, and, if record, a Recording of the first round's games."""
     fitnesses = jnp.zeros(genome.batch_size)
 
-    def many_games(fitnesses, rng):
+    def many_games(fitnesses, rng, record=False):
         rng_left, rng_right, rng_init = jax.random.split(rng, 3)
         ids_left = jax.random.permutation(rng_left, genome.batch_size)
         ids_right = jax.random.permutation(rng_right, genome.batch_size)
@@ -105,19 +133,34 @@ def fitness_2p(
                 reward_right=state.reward_right + rewards_right,
             )
 
-        state = jax.lax.fori_loop(0, steps_per_round, game_step, state)
+        recording = None
+        if record:
+            # scan rather than loop, to keep every step's state
+            def recorded_step(state, _):
+                state = game_step(None, state)
+                return state, state.task_state
+
+            state, frames = jax.lax.scan(recorded_step, state, length=steps_per_round)
+            players = jnp.stack([ids_left, ids_right], axis=-1)
+            recording = Recording(_episode_major(frames), players)
+        else:
+            state = jax.lax.fori_loop(0, steps_per_round, game_step, state)
         fitnesses = (
             fitnesses.at[ids_left]
             .add(state.reward_left)
             .at[ids_right]
             .add(state.reward_right)
         )
-        return fitnesses, None
+        return fitnesses, recording
 
-    fitnesses, _ = jax.lax.scan(
-        many_games, fitnesses, xs=jax.random.split(rng, num_rounds)
-    )
-    return fitnesses, None
+    rngs = jax.random.split(rng, num_rounds)
+    recording = None
+    if record:
+        # one round's games are enough to show: every genome plays in two of them
+        fitnesses, recording = many_games(fitnesses, rngs[0], record=True)
+        rngs = rngs[1:]
+    fitnesses, _ = jax.lax.scan(many_games, fitnesses, xs=rngs)
+    return fitnesses, recording
 
 
 def fitness_h2h(
@@ -156,7 +199,10 @@ def fitness_h2h(
 
 
 def make_fitness_fn(
-    task: VectorizedTask, num_steps: int, frames_len: Optional[int] = None
+    task: VectorizedTask,
+    num_steps: int,
+    frames_len: Optional[int] = None,
+    record: bool = False,
 ) -> Callable:
     assert num_steps > 0, "num_steps must be greater than 0"
     if frames_len is None:
@@ -168,11 +214,12 @@ def make_fitness_fn(
         reset_fn=task.reset,
         num_steps=num_steps,
         frames_len=frames_len,
+        record=record,
     )
 
 
 def make_2p_fitness_fn(
-    task: TwoPlayerTask, steps_per_round: int, num_rounds: int
+    task: TwoPlayerTask, steps_per_round: int, num_rounds: int, record: bool = False
 ) -> Callable:
     assert num_rounds > 0, "num_rounds must be greater than 0"
     assert steps_per_round > 0, "steps_per_round must be greater than 0"
@@ -182,6 +229,7 @@ def make_2p_fitness_fn(
         reset_fn=task.reset,
         steps_per_round=steps_per_round,
         num_rounds=num_rounds,
+        record=record,
     )
 
 
