@@ -685,6 +685,11 @@ const MEDIA_ORDER = ["episode", "network"];
 // the side the policy plays in the champion's game against an environment's
 // built-in baseline: evojax's single-player slimevolley gives it the right
 const BASELINE_SEAT = { slimevolley: 1 };
+// races against a field of bots: the champion's car is drawn in the first seat's
+// colours wherever on the grid it started, and the bots each in another team's
+const BOT_RACES = new Set(["f1tenth"]);
+// races between the generation's fittest, in fitness order on the grid
+const FIELD_RACES = new Set(["f1tenth_field"]);
 
 function mediaByKey() {
   const byKey = new Map();
@@ -788,13 +793,26 @@ function championLine(key, entry) {
   const champ = state.champions.get(entry.step);
   if (!champ || !MEDIA_ORDER.includes(key)) return [];
   const name = h("b", {}, genomeLink(champ.id, champ.name));
+  if (key === "episode" && FIELD_RACES.has(entry.env)) {
+    // the field on the grid, fittest first, each linking to the member
+    if (entry.players) {
+      const who = (p) => (p.name ? genomeLink(p.id, p.name, { step: entry.step }) : `#${p.id}`);
+      return [matchup(entry.players.map((p, seat) => seatPlayer(who(p), seat, entry.env, p.reward)))];
+    }
+    const text = "the generation's fittest racing each other, P1 the fittest";
+    return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "dim", text })))];
+  }
+  if (key === "episode" && BOT_RACES.has(entry.env)) {
+    const champion = h("span", { class: "ep-player" }, h("i", { class: "swatch", style: seatOf(entry.env, 0).style }), name);
+    return [matchup([champion, h("span", { class: "ep-player" }, h("span", { text: "bots" }))])];
+  }
   const seat = key === "episode" ? BASELINE_SEAT[entry.env] : undefined;
   if (seat === undefined) {
     return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "seat", text: "champion" }), swatch(champ.birth_species), name))];
   }
-  const players = [seatPlayer(name, seat), seatPlayer(h("span", { text: "baseline" }), 1 - seat)];
+  const players = [seatPlayer(name, seat, entry.env), seatPlayer(h("span", { text: "baseline" }), 1 - seat, entry.env)];
   if (seat === 1) players.reverse();
-  return [h("div", { class: "ep-games" }, h("span", { class: "ep-match" }, players[0], h("span", { class: "dim", text: "vs" }), players[1]))];
+  return [matchup(players)];
 }
 
 async function pollChampions() {
@@ -1560,21 +1578,49 @@ async function loadNetwork(tab, card) {
   });
 }
 
-// two-player games: which side the member played, in the renderers' colours
-const SEATS = [
-  { name: "left", color: "var(--s1)" },
-  { name: "right", color: "var(--s2)" },
+// which seat each player of a game had, in the renderers' colours: the sides of a
+// two-player game, or a race's places on the grid, each car a parody of a 2026 team
+// in its livery (monitor/renderers.py LIVERIES), with an edge so the white cars show
+const LIVERIES = [
+  ["Mclando", "#ff8000"],
+  ["Vercedes", "#b9bec4"],
+  ["Red Cow", "#1e2d6e"],
+  ["Berrari", "#dc0000"],
+  ["Billiams", "#0a3282"],
+  ["Racing Ducks", "#f0f0f5"],
+  ["Ostin Marlin", "#005e46"],
+  ["Yaas", "#f0f0f0"],
+  ["Audo", "#969ba0"],
+  ["Alpone", "#0078dc"],
+  ["Chadillac", "linear-gradient(90deg, #e6e6e1 50%, #191919 50%)"],
 ];
+const SEATS = {
+  f1tenth_field: (seat) => SEATS.f1tenth(seat),
+  f1tenth: (seat) => {
+    const [team, color] = LIVERIES[seat % LIVERIES.length];
+    return { name: `P${seat + 1} ${team}`, team, style: `background:${color};box-shadow:inset 0 0 0 1px var(--edge)` };
+  },
+};
+const SIDES = [
+  { name: "left", style: "background:var(--s1)" },
+  { name: "right", style: "background:var(--s2)" },
+];
+const seatOf = (env, seat) => (SEATS[env] ? SEATS[env](seat) : SIDES[seat]);
 
-// a player of a two-player game, marked with its side's colour in the picture
-function seatPlayer(who, seat) {
-  return h(
-    "span",
-    { class: "ep-player" },
-    h("i", { class: "swatch", style: `background:${SEATS[seat].color}` }),
-    who,
-    h("span", { class: "seat", text: SEATS[seat].name }),
-  );
+// a player of a game, marked with its seat's colour in the picture, and with its
+// reward over the game if the run recorded it
+function seatPlayer(who, seat, env, reward) {
+  const { name, style } = seatOf(env, seat);
+  const score = reward == null ? [] : [h("span", { class: "seat", text: `${reward.toFixed(1)}${REWARD_UNITS[env] || ""}` })];
+  return h("span", { class: "ep-player" }, h("i", { class: "swatch", style }), who, h("span", { class: "seat", text: name }), ...score);
+}
+// what the environments' rewards are measured in
+const REWARD_UNITS = { f1tenth: " m", f1tenth_field: " m" };
+
+// players side by side, "a vs b vs c"
+function matchup(players) {
+  const parts = players.flatMap((p, i) => (i ? [h("span", { class: "dim", text: "vs" }), p] : [p]));
+  return h("div", { class: "ep-games" }, h("span", { class: "ep-match" }, ...parts));
 }
 
 async function loadEpisodes(tab, card) {
@@ -1594,9 +1640,8 @@ async function loadEpisodes(tab, card) {
     h("span", { class: "spacer" }),
     stepScrub(tab, eps.steps, eps.step),
   );
-  // two-player games: say who played which side, in the order and colours of the
-  // picture; the opponent opens on this same game
-  const twoPlayer = ep.players.length === 2;
+  // games of several players: say who played which seat, in the order and colours
+  // of the picture; the others open on this same game
   const player = (p, seat) =>
     seatPlayer(
       p.id === tab.id
@@ -1605,11 +1650,11 @@ async function loadEpisodes(tab, card) {
           ? genomeLink(p.id, p.name, { step: eps.step, game: ep.index })
           : `#${p.id}`,
       seat,
+      eps.env,
+      p.reward,
     );
-  const matchup =
-    twoPlayer &&
-    h("div", { class: "ep-games" }, h("span", { class: "ep-match" }, player(ep.players[0], 0), h("span", { class: "dim", text: "vs" }), player(ep.players[1], 1)));
-  card.foot.replaceChildren(...[matchup].filter(Boolean));
+  const players = ep.players.length > 1 && matchup(ep.players.map(player));
+  card.foot.replaceChildren(...[players].filter(Boolean));
   // swapping the image restarts the gif, so only when the episode changes
   const src = `/api/runs/${state.runId}/member_episodes/${eps.step}/${ep.index}`;
   if (card.shown === src) return;

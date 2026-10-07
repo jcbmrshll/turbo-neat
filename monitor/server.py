@@ -186,6 +186,20 @@ class RunStore:
         with lineage.lock:
             return lineage.champions()
 
+    def players(self, run_id: str, genome_ids: Any) -> List[Dict[str, Any]]:
+        """Genomes by id and name (None for any not logged as members yet)."""
+        lineage = self.lineage(run_id)
+        with lineage.lock:
+            return [
+                {
+                    "id": int(g),
+                    "name": alias(int(g), int(lineage.birth_species[int(g)]))
+                    if lineage.known(int(g))
+                    else None,
+                }
+                for g in genome_ids
+            ]
+
     def individual(self, run_id: str, genome_id: int, depth: int) -> Dict[str, Any]:
         lineage = self.lineage(run_id)
         with lineage.lock:
@@ -270,6 +284,8 @@ class RunStore:
             raise KeyError(step)
         with np.load(files[step], allow_pickle=False) as npz:
             players = npz["players"]
+            # each seat's reward over the episode, if the run recorded it
+            rewards = npz["rewards"][:, -1] if "rewards" in npz.files else None
         with lineage.lock:
 
             def player(p: int) -> Dict[str, Any]:
@@ -283,7 +299,10 @@ class RunStore:
             episodes = [
                 {
                     "index": int(i),
-                    "players": [player(int(p)) for p in players[i]],
+                    "players": [
+                        _with_reward(player(int(p)), rewards, i, seat)
+                        for seat, p in enumerate(players[i])
+                    ],
                     "seat": int(np.flatnonzero(players[i] == genome_id)[0]),
                 }
                 for i in np.flatnonzero((players == genome_id).any(axis=1))
@@ -338,14 +357,18 @@ class RunStore:
         content_type: str,
         data: bytes,
         env: Optional[str] = None,
+        players: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Store media; `env` names the environment of a rendered episode."""
+        """Store media; `env` names the environment of a rendered episode, and
+        `players` the genomes playing it, one per seat."""
         run_dir = self._dir(run_id)
         ext = MEDIA_TYPES[content_type]
         file = f"{_safe(key)}-{step}.{ext}"
         entry = {"key": key, "step": step, "file": file, "time": time.time()}
         if env is not None:
             entry["env"] = env
+        if players is not None:
+            entry["players"] = players
         with self.lock:
             (run_dir / "media" / file).write_bytes(data)
             with open(run_dir / "media.jsonl", "a") as f:
@@ -419,6 +442,13 @@ class RunStore:
         return path
 
 
+def _with_reward(player: Dict[str, Any], rewards: Any, *index: int) -> Dict[str, Any]:
+    """player, with its reward from rewards[index] if there are rewards."""
+    if rewards is None:
+        return player
+    return {**player, "reward": float(rewards[index])}
+
+
 def render_episode(
     store: RunStore, run_id: str, key: str, step: int, env: str, path: Path
 ) -> None:
@@ -426,10 +456,17 @@ def render_episode(
     try:
         with np.load(path, allow_pickle=False) as npz:
             data = {name: npz[name] for name in npz.files}
+        # who played each seat, if the run said, for the dashboard to name, with
+        # each one's reward over the episode if the run recorded it
+        ids = data.pop("players", None)
+        players = None if ids is None else store.players(run_id, ids)
+        if players is not None:
+            final = data["rewards"][-1] if "rewards" in data else None
+            players = [_with_reward(p, final, seat) for seat, p in enumerate(players)]
         media = encode_media(RENDERERS[env](data))
         if media is None:
             raise TypeError(f"the {env!r} renderer returned nothing displayable")
-        store.add_media(run_id, key, step, *media, env=env)
+        store.add_media(run_id, key, step, *media, env=env, players=players)
     except Exception as e:
         traceback.print_exc()
         store.add_media_error(run_id, key, step, f"{type(e).__name__}: {e}")
