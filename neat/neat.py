@@ -6,9 +6,10 @@ from typing import Any, Callable, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
-from monitor import Monitor
+from monitor import Members, Monitor, Networks
 from neat.activations import ActivationSelector
 from neat.config import GenomeConfig, NEATConfig
+from neat.fitness import Recording
 from neat.genome import (
     Genome,
     extend_capacity,
@@ -25,12 +26,13 @@ from neat.population import (
     create_next_generation,
 )
 from neat.species import fill_prev_stats, get_species_stats
-from neat.utils import apply, is_printable, mask_data
+from neat.utils import apply, is_printable
 from neat.visualize import genome_to_network
 
 # called with keyword arguments (rng, genome, activation_selector), or for head-to-head
 # functions (rng, genome_1, genome_2, activation_selector)
-# returns fitness and any auxiliary data (e.g. the episode, for the monitor)
+# returns fitness and any auxiliary data (e.g. the episode, for the monitor); a
+# fitness function made with record=True returns a Recording of every episode
 FitnessFn = Callable[..., Tuple[jax.Array, Any]]
 
 
@@ -56,12 +58,14 @@ def init_population(
     )
 
     next_innovation_id = batched_genome.graph.innovation_ids.max() + 1
+    next_genome_id = batched_genome.genome_id.max() + 1
 
     return _init_population(
         batched_genome,
         config.mutation_config,
         config.selection_config,
         next_innovation_id,
+        next_genome_id,
         generation,
     )
 
@@ -102,20 +106,22 @@ def evaluate(
     population: Population,
     fitness_fn: FitnessFn,
     activation_selector: ActivationSelector,
-) -> Population:
-    """Evaluate the fitness of a genome"""
+) -> Tuple[Population, Optional[Recording]]:
+    """Evaluate the fitness of every genome; also returns the episodes they played,
+    if the fitness function recorded them"""
     population = replace(
         population, batched_genome=prepare_for_inference(population.batched_genome)
     )
     genome = population.batched_genome
     # Evaluate fitness of population
     fitness_rng, rng = jax.random.split(rng)
-    fitnesses, _ = fitness_fn(
+    fitnesses, aux = fitness_fn(
         rng=fitness_rng, genome=genome, activation_selector=activation_selector
     )
     # store raw fitnesses in genome
     genome = replace(genome, fitness=fitnesses)
-    return replace(population, batched_genome=genome)
+    recording = aux if isinstance(aux, Recording) else None
+    return replace(population, batched_genome=genome), recording
 
 
 def evolve_one_generation(
@@ -182,9 +188,12 @@ def test_against_champion(
     champion_fitness = fitnesses[0]
     challenger_fitness = fitnesses[1]
     new_champion = challenger_fitness > champion_fitness
-    mask_fn = partial(mask_data, mask=new_champion)
+    # a scalar mask broadcasts as is (mask_data would give scalar fields a batch axis)
     population = replace(
-        population, champion=jax.tree.map(mask_fn, challenger, champion)
+        population,
+        champion=jax.tree.map(
+            lambda x, y: jnp.where(new_champion, x, y), challenger, champion
+        ),
     )
     return population, challenger_fitness, new_champion
 
@@ -193,7 +202,9 @@ class NEAT:
     """NEAT algorithm"""
 
     # jitted steps, bound to the config and fitness functions in __init__
-    evaluate_population: Callable[[jax.Array, Population], Population]
+    evaluate_population: Callable[
+        [jax.Array, Population], Tuple[Population, Optional[Recording]]
+    ]
     evolve: Callable[[jax.Array, Population], Population]
     test_champion: Optional[
         Callable[[jax.Array, Population], Tuple[Population, jax.Array, jax.Array]]
@@ -290,7 +301,7 @@ class NEAT:
             results = {}
             rng, gen_rng, eval_rng, test_rng = jax.random.split(rng, 4)
             # evaluate population
-            population = self.evaluate_population(eval_rng, population)
+            population, recording = self.evaluate_population(eval_rng, population)
             # adjust mutation noise
             num_unique_species = len(
                 jnp.unique(population.batched_genome.species_id).tolist()
@@ -363,12 +374,35 @@ class NEAT:
                     )
                     results["fitness_against_baseline"] = test_fitness
 
+            # evolving re-sorts each graph by innovation, so keep the evaluated
+            # population (graphs condensed, in topological order) for its networks
+            evaluated = population.batched_genome
             # evolve population
             population = self.evolve(gen_rng, population)
 
             if self.monitor is not None:
-                # logging is i/o bound (and copies the episode off the device), so it
-                # goes to a background thread
+                # evolving speciated this generation and kept it as prev_batched_genome,
+                # so log its members from there, in the species they were assigned to
+                members = population.prev_batched_genome
+                results["members"] = Members(
+                    ids=members.genome_id,
+                    parents=members.parent_ids,
+                    species=members.species_id,
+                    fitness=members.fitness,
+                    champion=population.champion.genome_id,
+                )
+                results["networks"] = Networks(
+                    ids=evaluated.genome_id,
+                    from_nodes=evaluated.graph.from_nodes,
+                    to_nodes=evaluated.graph.to_nodes,
+                    weights=evaluated.graph.weights,
+                    num_connections=evaluated.condensed_size,
+                    activation_ids=evaluated.node_activation_ids,
+                    biases=evaluated.node_biases,
+                    num_nodes=evaluated.next_node_idx,
+                )
+                # logging is i/o bound (and copies the episode, members and networks
+                # off the device), so it goes to a background thread
                 log_args = (
                     self.monitor,
                     dict(prev_stats),
@@ -376,6 +410,8 @@ class NEAT:
                     g,
                     episode_data,
                     episode_fn,
+                    recording,
+                    evaluated.genome_id,
                 )
                 with jax.default_device(jax.devices("cpu")[0]):
                     if log_async:

@@ -39,6 +39,7 @@ class Population:
     prev_batched_genome: Genome
     champion: Genome
     next_innovation_id: jax.Array
+    next_genome_id: jax.Array
     generation: jax.Array
     species_data: SpeciesData
     # store in population for mutation scaling
@@ -265,10 +266,22 @@ def crossover(
         crossover_keys,
         inferior_parents,
     )
+    # offspring are new individuals; elites carry on as themselves
+    born_mask = ~elite_mask
+    new_ids = population.next_genome_id + jnp.cumsum(born_mask) - 1
+    parent_ids = jnp.stack(
+        [superior_parents.genome_id, inferior_parents.genome_id], axis=-1
+    )
+    offspring = replace(
+        offspring,
+        genome_id=mask_data(new_ids, offspring.genome_id, born_mask),
+        parent_ids=mask_data(parent_ids, offspring.parent_ids, born_mask),
+    )
     return replace(
         population,
         prev_batched_genome=population.batched_genome,
         batched_genome=offspring,
+        next_genome_id=population.next_genome_id + born_mask.sum(),
     )
 
 
@@ -424,6 +437,7 @@ def _init_population(
     mutation_config: MutationConfig,
     selection_config: SelectionConfig,
     next_innovation_id: ArrayLike,
+    next_genome_id: ArrayLike,
     generation: int = 0,
     next_species_id: int = 0,
 ) -> Population:
@@ -432,6 +446,7 @@ def _init_population(
         prev_batched_genome=batched_genome,
         champion=jax.tree.map(lambda x: x[0], batched_genome),
         next_innovation_id=jnp.int32(next_innovation_id),
+        next_genome_id=jnp.int32(next_genome_id),
         generation=jnp.int32(generation),
         species_data=init_species_data(
             selection_config.maximum_species, next_species_id

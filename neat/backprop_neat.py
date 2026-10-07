@@ -1,6 +1,6 @@
 from dataclasses import replace
 from functools import partial
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -8,13 +8,15 @@ import jax.numpy as jnp
 from monitor import Monitor
 from neat.activations import ActivationSelector
 from neat.config import NEATConfig
+from neat.fitness import Recording
 from neat.genome import Genome, prepare_for_inference
 from neat.neat import NEAT, FitnessFn, evolve_one_generation, test_against_baseline
 from neat.population import Population
 
 # called like a FitnessFn on a fresh batch of data; returns fitness (-loss) and
-# (weight grads, bias grads) of the loss for each genome
-BackpropFn = Callable[..., Tuple[jax.Array, Tuple[jax.Array, jax.Array]]]
+# (weight grads, bias grads) of the loss for each genome, then, if it was made to
+# record, a Recording of what each genome was scored on
+BackpropFn = Callable[..., Tuple[Any, ...]]
 
 # fitness given to a genome whose loss is no longer finite
 DIVERGED_FITNESS = -1e6
@@ -55,12 +57,13 @@ def evaluate_and_train(
     num_steps: int,
     max_grad_norm: Optional[float],
     activation_selector: ActivationSelector,
-) -> Population:
+) -> Tuple[Population, Optional[Recording]]:
     """Train the weights and biases of every genome by gradient descent, then score
     the trained genomes on a fresh batch.
 
     The trained weights are kept (and inherited), so the population's weights improve
-    across generations as well as within them."""
+    across generations as well as within them. Also returns what each genome was
+    scored on, if backprop_fn records it."""
     population = replace(
         population, batched_genome=prepare_for_inference(population.batched_genome)
     )
@@ -68,7 +71,7 @@ def evaluate_and_train(
     train_rng, eval_rng = jax.random.split(rng)
 
     def train_step(genome: Genome, rng: jax.Array) -> Tuple[Genome, None]:
-        _, (weight_grads, bias_grads) = backprop_fn(
+        _, (weight_grads, bias_grads), *_ = backprop_fn(
             rng=rng, genome=genome, activation_selector=activation_selector
         )
         return gradient_step(
@@ -76,11 +79,14 @@ def evaluate_and_train(
         ), None
 
     genome, _ = jax.lax.scan(train_step, genome, jax.random.split(train_rng, num_steps))
-    fitnesses, _ = backprop_fn(
+    fitnesses, _, *recorded = backprop_fn(
         rng=eval_rng, genome=genome, activation_selector=activation_selector
     )
     fitnesses = jnp.where(jnp.isfinite(fitnesses), fitnesses, DIVERGED_FITNESS)
-    return replace(population, batched_genome=replace(genome, fitness=fitnesses))
+    recording = recorded[0] if recorded else None
+    return replace(
+        population, batched_genome=replace(genome, fitness=fitnesses)
+    ), recording
 
 
 class BackpropNEAT(NEAT):

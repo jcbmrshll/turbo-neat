@@ -1,4 +1,5 @@
-// turbo-neat monitor: run list, live charts, episode and network viewers.
+// turbo-neat monitor: run list, live charts, episode and network viewers, and a
+// leaderboard of the population with each member's lineage.
 // No framework; every view is plain DOM built with h(), and labels that come
 // from a run (metric names, config values) only ever go in as text.
 
@@ -19,6 +20,10 @@ const HEADLINE = [
 ];
 // charts that lead the grid; the rest follow in the order they were first logged
 const CHART_ORDER = ["fitness", "fitness_against_baseline", "challenger_fitness"];
+const BOARD_LIMIT = 50;
+// how many generations of parents the pedigree starts with, and steps by
+const PEDIGREE_DEPTH = 6;
+const PEDIGREE_STEP = 3;
 
 const state = {
   runs: [],
@@ -31,6 +36,19 @@ const state = {
   // media key -> index into that key's entries, or null to follow the latest
   mediaSel: {},
   connected: true,
+  // the leaderboard panel
+  board: null,
+  boardScope: "alive",
+  boardSort: "fitness",
+  speciesNames: {},
+  // the open member tabs, in order (see openTab), and the one shown: a genome id,
+  // or null for the run's own tab
+  tabs: [],
+  activeTab: null,
+  // the run tab's charts are drawn to its width, so they wait while it's hidden
+  overviewStale: false,
+  // step -> that generation's champion ({id, name, birth_species})
+  champions: new Map(),
 };
 
 // ---------------------------------------------------------------- helpers
@@ -128,12 +146,22 @@ function route() {
   return m ? m[1] : null;
 }
 
+// the member whose tab is shown: /run/<run id>/genome/<genome id>
+function routeGenome() {
+  const m = location.pathname.match(/^\/run\/[\w-]+\/genome\/(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
 function go(runId) {
   history.pushState(null, "", runId ? `/run/${runId}` : "/");
   select(runId);
 }
 
-window.addEventListener("popstate", () => select(route()));
+window.addEventListener("popstate", () => {
+  const runId = route();
+  if (runId && runId === state.runId) openTab(routeGenome(), { push: false });
+  else select(runId);
+});
 
 // ---------------------------------------------------------------- sidebar
 
@@ -202,6 +230,7 @@ function renderEmpty() {
     return;
   }
   view = null;
+  document.body.classList.remove("has-board");
   main.replaceChildren(
     h(
       "div",
@@ -229,10 +258,22 @@ async function select(runId) {
     media: [],
     mediaNext: 0,
     mediaSel: {},
+    board: null,
+    speciesNames: {},
+    tabs: [],
+    activeTab: null,
+    overviewStale: false,
+    overviewScroll: 0,
+    champions: new Map(),
   });
   renderSide();
+  document.body.classList.remove("has-board");
+  document.getElementById("board").replaceChildren();
   view = {
     head: h("div", { class: "runhead" }),
+    tabbar: h("nav", { class: "tabs" }),
+    overview: h("div", { class: "tab-panel" }),
+    panels: h("div"),
     tiles: h("div", { class: "tiles" }),
     mediaTitle: h("div", { class: "stitle", text: "Champion" }),
     media: h("div", { class: "media-grid" }),
@@ -242,21 +283,20 @@ async function select(runId) {
     config: h("div", { class: "config-grid" }),
     mediaCards: {},
   };
-  main.replaceChildren(
-    h(
-      "div",
-      { class: "page" },
-      view.head,
-      view.tiles,
-      view.mediaTitle,
-      view.media,
-      view.chartsTitle,
-      view.charts,
-      view.configTitle,
-      view.config,
-    ),
+  view.overview.append(
+    view.tiles,
+    view.mediaTitle,
+    view.media,
+    view.chartsTitle,
+    view.charts,
+    view.configTitle,
+    view.config,
   );
+  main.replaceChildren(h("div", { class: "page" }, view.head, view.tabbar, view.overview, view.panels));
   main.scrollTop = 0;
+  // the member tabs this run had open, then the one in the address
+  for (const tab of savedTabs(runId)) addTab(tab.id, tab.name);
+  openTab(routeGenome(), { push: false });
   await pollRun();
 }
 
@@ -284,12 +324,27 @@ async function pollRun() {
     if (firstLoad) renderConfig();
     if (firstLoad || metrics.rows.length) {
       renderTiles();
-      renderCharts();
+      if (state.activeTab == null) renderCharts();
+      else state.overviewStale = true;
     }
-    if (firstLoad || media.rows.length) renderMedia();
+    if (firstLoad || media.rows.length) {
+      if (state.activeTab == null) renderMedia();
+      else state.overviewStale = true;
+    }
+    // members are logged before the metrics of their generation, so a new
+    // generation of metrics means the leaderboard has one too
+    if (firstLoad || metrics.rows.length) {
+      pollBoard();
+      pollChampions();
+      const tab = activeTab();
+      if (tab) pollMember(tab);
+      // the rest catch up when they're shown
+      for (const t of state.tabs) if (t !== tab) t.stale = true;
+    }
   } catch (e) {
     if (String(e.message).startsWith("404")) {
       main.replaceChildren(h("div", { class: "empty" }, h("h1", { text: "No such run" })));
+      document.body.classList.remove("has-board");
       state.runId = null;
     } else {
       setConnected(false);
@@ -400,11 +455,23 @@ function renderCharts() {
 }
 
 function chartCard(group) {
-  const series = group.series.map((s, i) => ({
-    ...s,
-    color: SERIES[i % SERIES.length],
-    points: state.rows.filter((r) => r[s.key] != null).map((r) => [r.step, r[s.key]]),
-  }));
+  const series = group.series.map((s, i) => {
+    // species_*/s<id> series are named and coloured after their species
+    const species = group.name.startsWith("species_") && s.name.match(/^s(\d+)$/);
+    return {
+      ...s,
+      name: species ? state.speciesNames[species[1]] || s.name : s.name,
+      color: species ? speciesColor(Number(species[1])) : SERIES[i % SERIES.length],
+      points: state.rows.filter((r) => r[s.key] != null).map((r) => [r.step, r[s.key]]),
+    };
+  });
+  const single = series.length === 1;
+  return seriesCard(group.name.replaceAll("_", " "), series, single && fmt(latest(series[0].key)));
+}
+
+// a card with a line chart of the series ([step, value] points), a legend when
+// there's more than one, and `latestText` in the corner if given
+function seriesCard(title, series, latestText) {
   const single = series.length === 1;
   const card = h(
     "div",
@@ -412,9 +479,9 @@ function chartCard(group) {
     h(
       "div",
       { class: "card-hdr" },
-      h("span", { class: "title", text: group.name.replaceAll("_", " ") }),
+      h("span", { class: "title", text: title }),
       h("span", { class: "spacer" }),
-      single && h("span", { class: "latest", text: fmt(latest(series[0].key)) }),
+      latestText && h("span", { class: "latest", text: latestText }),
     ),
     !single &&
       h(
@@ -543,19 +610,33 @@ window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     if (!view) return;
-    if (state.rows.length) renderCharts();
-    // networks are drawn to fit; leave images alone so gifs don't restart
-    for (const card of Object.values(view.mediaCards)) {
-      if (card.shown?.endsWith(".json")) card.shown = null;
+    const tab = activeTab();
+    if (tab) {
+      if (tab.individual) renderMember(tab);
+    } else {
+      relayoutOverview();
     }
-    renderMedia();
   }, 150);
 });
+
+// redraw what the run tab draws to fit its width
+function relayoutOverview() {
+  state.overviewStale = false;
+  if (state.rows.length) renderCharts();
+  // networks are drawn to fit; leave images alone so gifs don't restart
+  for (const card of Object.values(view.mediaCards)) {
+    if (card.shown?.endsWith(".json")) card.shown = null;
+  }
+  renderMedia();
+}
 
 // ---------------------------------------------------------------- media
 
 const MEDIA_TITLES = { episode: "episode", network: "network" };
 const MEDIA_ORDER = ["episode", "network"];
+// the side the policy plays in the champion's game against an environment's
+// built-in baseline: evojax's single-player slimevolley gives it the right
+const BASELINE_SEAT = { slimevolley: 1 };
 
 function mediaByKey() {
   const byKey = new Map();
@@ -580,10 +661,11 @@ function renderMedia() {
       card = {
         hdr: h("div", { class: "card-hdr" }),
         body: h("div", { class: "media-body" }),
+        who: h("div"),
         foot: h("div"),
         shown: null,
       };
-      card.el = h("div", { class: "card" }, card.hdr, card.body, card.foot);
+      card.el = h("div", { class: "card" }, card.hdr, card.body, card.who, card.foot);
       view.mediaCards[key] = card;
       view.media.append(card.el);
     }
@@ -616,6 +698,7 @@ function updateMediaCard(key, entries, card) {
       }),
     ),
   );
+  card.who.replaceChildren(...championLine(key, entry));
   // swapping the element restarts a gif, so only do it when the entry changes
   const id = entry.file || `error-${entry.step}`;
   if (card.shown === id) return;
@@ -644,6 +727,34 @@ function updateMediaCard(key, entries, card) {
     card.body.replaceChildren(h("video", { src, autoplay: true, loop: true, muted: true, controls: true }));
   } else {
     card.body.replaceChildren(h("img", { src, alt: `${key} at gen ${entry.step}` }));
+  }
+}
+
+// the champion's episode and network are that generation's champion's; name it,
+// and in a game against a built-in baseline, who played which side
+function championLine(key, entry) {
+  const champ = state.champions.get(entry.step);
+  if (!champ || !MEDIA_ORDER.includes(key)) return [];
+  const name = h("b", {}, genomeLink(champ.id, champ.name));
+  const seat = key === "episode" ? BASELINE_SEAT[entry.env] : undefined;
+  if (seat === undefined) {
+    return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "seat", text: "champion" }), swatch(champ.birth_species), name))];
+  }
+  const players = [seatPlayer(name, seat), seatPlayer(h("span", { text: "baseline" }), 1 - seat)];
+  if (seat === 1) players.reverse();
+  return [h("div", { class: "ep-games" }, h("span", { class: "ep-match" }, players[0], h("span", { class: "dim", text: "vs" }), players[1]))];
+}
+
+async function pollChampions() {
+  const runId = state.runId;
+  try {
+    const champions = await api(`/api/runs/${runId}/champions`);
+    if (runId !== state.runId) return;
+    state.champions = new Map(champions.map((c) => [c.step, c]));
+    if (state.activeTab == null) renderMedia();
+    else state.overviewStale = true;
+  } catch {
+    // runs from before members were logged have none
   }
 }
 
@@ -747,9 +858,737 @@ function networkView(net, width) {
       svg.append(h("text", { class: "lab", x: n.x + 9, y: n.y + 3.5, text: n.label }));
     }
   }
-  const summary = `${hidden.length} hidden · ${net.edges.length} connections · ` +
-    `positive weights blue, negative orange`;
+  const summary = `${hidden.length} hidden · ${net.edges.length} connections`;
   return { svg, summary };
+}
+
+// ---------------------------------------------------------------- leaderboard
+
+function speciesColor(id) {
+  return SERIES[((id % SERIES.length) + SERIES.length) % SERIES.length];
+}
+
+// "big-red-dog", with the species part set apart
+function nameEl(name) {
+  const cut = name.lastIndexOf("-");
+  return h("span", { class: "gname" }, name.slice(0, cut), h("span", { class: "sp", text: name.slice(cut) }));
+}
+
+function swatch(species) {
+  return h("i", { class: "swatch", style: `background:${speciesColor(species)}` });
+}
+
+// a link that opens a member's tab; `at` ({step, game}) opens it on one of its games
+function genomeLink(id, name, at = null) {
+  return h(
+    "a",
+    {
+      class: "glink",
+      href: `/run/${state.runId}/genome/${id}`,
+      onclick: (e) => {
+        if (e.metaKey || e.ctrlKey) return;
+        e.preventDefault();
+        openTab(id, { name, at });
+      },
+    },
+    nameEl(name),
+  );
+}
+
+async function pollBoard() {
+  const runId = state.runId;
+  const q = `scope=${state.boardScope}&sort=${state.boardSort}&limit=${BOARD_LIMIT}`;
+  try {
+    const board = await api(`/api/runs/${runId}/leaderboard?${q}`);
+    if (runId !== state.runId) return;
+    const renamed = JSON.stringify(board.species_names) !== JSON.stringify(state.speciesNames);
+    state.board = board;
+    state.speciesNames = board.species_names;
+    renderBoard();
+    if (renamed && state.rows.length) {
+      if (state.activeTab == null) renderCharts();
+      else state.overviewStale = true;
+    }
+  } catch {
+    // the run's charts carry on without it
+  }
+}
+
+const BOARD_SORTS = [
+  { sort: "fitness", label: "fitness", title: "fitness in its latest generation" },
+  { sort: "best", label: "best", title: "best fitness in any generation" },
+  { sort: "age", label: "gens", title: "generations in the population" },
+  { sort: "children", label: "kids", title: "children" },
+];
+
+// the leaderboard, in the panel on the right; it's there whenever the run logged
+// its members
+function renderBoard() {
+  const board = state.board;
+  const has = board && board.step != null;
+  document.body.classList.toggle("has-board", Boolean(has));
+  const panel = document.getElementById("board");
+  if (!has) {
+    panel.replaceChildren();
+    return;
+  }
+  const toggle = (on, text, title, onclick) => h("button", { class: on ? "on" : null, text, title, onclick });
+  const scopes = h(
+    "span",
+    { class: "scrub" },
+    [["alive", "this gen"], ["all", "all time"]].map(([value, text]) =>
+      toggle(state.boardScope === value, text, null, () => {
+        state.boardScope = value;
+        // all time defaults to the best ever, this generation to the latest
+        state.boardSort = value === "all" ? "best" : "fitness";
+        pollBoard();
+      }),
+    ),
+  );
+  const sorts = h(
+    "span",
+    { class: "scrub" },
+    h("span", { class: "dim", text: "by" }),
+    BOARD_SORTS.map((c) =>
+      toggle(state.boardSort === c.sort, c.label, c.title, () => {
+        state.boardSort = c.sort;
+        pollBoard();
+      }),
+    ),
+  );
+  const th = (text, cls, sort) =>
+    h("th", { class: [cls, sort && sort === state.boardSort && "on"].filter(Boolean).join(" ") || null, text });
+  const head = h(
+    "tr",
+    {},
+    th("#", "rank"),
+    th("individual"),
+    th("fitness", "num", "fitness"),
+    th("best", "num", "best"),
+    th("gens", "num", "age"),
+    th("kids", "num", "children"),
+    h("th", { text: "rank over life", title: "its rank by fitness in each generation it was in" }),
+  );
+  // in this generation, rank lines share one time axis so longevity shows
+  const shared = state.boardScope === "alive" && {
+    x0: Math.min(...board.rows.map((r) => r.history[0]?.[0] ?? board.step)),
+    x1: board.step,
+  };
+  const open = new Set(state.tabs.map((t) => t.id));
+  const rows = board.rows.map((r, i) =>
+    h(
+      "tr",
+      {
+        class: ["row", r.id === state.activeTab && "sel", open.has(r.id) && "open", !r.alive && "gone"].filter(Boolean).join(" "),
+        title: `${r.name} · ${r.species_name}${r.alive ? `, born gen ${r.born}` : `, gen ${r.born}–${r.last}`}`,
+        onclick: () => openTab(r.id, { name: r.name }),
+      },
+      h("td", { class: "rank", text: i + 1 }),
+      h("td", { class: "who" }, swatch(r.birth_species), nameEl(r.name), r.champion && h("span", { class: "tag", text: "champ" })),
+      h("td", { class: "num", text: fmt(r.fitness) }),
+      h("td", { class: "num", text: fmt(r.best) }),
+      h("td", { class: "num", text: r.age }),
+      h("td", { class: "num", text: r.children }),
+      h(
+        "td",
+        { title: r.history.length ? `rank ${r.history.at(-1)[2]} of ${board.population} in gen ${r.history.at(-1)[0]}` : null },
+        rankline(r.history, board.population, speciesColor(r.birth_species), shared),
+      ),
+    ),
+  );
+  // the table keeps its scroll from one generation to the next
+  if (!panel.firstChild) panel.append(h("div", { class: "bp-head" }), h("div", { class: "bp-table" }));
+  const [top, wrap] = panel.children;
+  top.replaceChildren(
+    h("div", { class: "stitle", text: "Leaderboard" }),
+    h("div", { class: "bp-sub", text: `gen ${board.step} · ${board.population} members · ${board.total.toLocaleString("en")} seen` }),
+    h("div", { class: "bp-controls" }, scopes, sorts),
+  );
+  const scrolled = wrap.scrollTop;
+  wrap.replaceChildren(h("table", { class: "board" }, h("thead", {}, head), h("tbody", {}, rows)));
+  wrap.scrollTop = scrolled;
+}
+
+// a member's rank over its life ([step, fitness, rank] points), first place at the
+// top, on one log scale (1 to the population size) for every row so they compare;
+// `domain` ({x0, x1}) puts rows on one time axis too
+function rankline(points, population, color, domain) {
+  const W = 64, H = 16;
+  const svg = h("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+  const pts = points.map(([step, , rank]) => [step, rank]);
+  if (!pts.length) return svg;
+  const x0 = domain ? domain.x0 : pts[0][0];
+  const x1 = domain ? domain.x1 : pts[pts.length - 1][0];
+  const sx = (x) => 3 + (x1 === x0 ? 1 : (x - x0) / (x1 - x0)) * (W - 6);
+  const sy = (rank) => 3 + (Math.log(rank) / Math.log(Math.max(2, population))) * (H - 6);
+  if (pts.length > 1) {
+    const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${sx(x).toFixed(1)},${sy(y).toFixed(1)}`).join("");
+    svg.append(h("path", { d, stroke: color, fill: "none", "stroke-width": 1.25 }));
+  }
+  const [lx, ly] = pts[pts.length - 1];
+  svg.append(h("circle", { cx: sx(lx), cy: sy(ly), r: 2, fill: color }));
+  return svg;
+}
+
+// ---------------------------------------------------------------- tabs
+
+// The run's own tab is always there; each member opened gets a tab of its own,
+// which keeps its place (pedigree depth, the generation and game it shows, how far
+// down it's scrolled) while others are shown.
+
+function activeTab() {
+  return state.tabs.find((t) => t.id === state.activeTab) || null;
+}
+
+// the member tabs a run had open, kept for the browser session
+function savedTabs(runId) {
+  try {
+    return JSON.parse(sessionStorage.getItem(`tabs:${runId}`)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTabs() {
+  sessionStorage.setItem(`tabs:${state.runId}`, JSON.stringify(state.tabs.map((t) => ({ id: t.id, name: t.name }))));
+}
+
+function addTab(id, name) {
+  let tab = state.tabs.find((t) => t.id === id);
+  if (!tab) {
+    tab = {
+      id,
+      name: name || null,
+      individual: null,
+      depth: PEDIGREE_DEPTH,
+      // the generation of its life the network and episode cards show (pinned to
+      // its latest when first shown), and the game shown when it was opened on
+      // one (by the game's index), rather than its own
+      step: null,
+      game: null,
+      // network and episode data fetched, by "<kind>@<step>"
+      data: {},
+      cards: null,
+      scroll: 0,
+      stale: true,
+      el: h("div", { class: "tab-panel", hidden: true }),
+    };
+    state.tabs.push(tab);
+    view.panels.append(tab.el);
+    saveTabs();
+  }
+  return tab;
+}
+
+// show a member's tab, opening it if need be; null shows the run's tab. `at`
+// ({step, game}) turns it to one of its games, e.g. the one it played with the
+// member whose tab it was opened from
+function openTab(id, { name = null, push = true, at = null } = {}) {
+  if (!view) return;
+  if (id != null) {
+    const tab = addTab(id, name);
+    if (at) {
+      tab.step = at.step;
+      tab.game = at.game;
+    }
+  }
+  if (push && id !== state.activeTab) {
+    history.pushState(null, "", id == null ? `/run/${state.runId}` : `/run/${state.runId}/genome/${id}`);
+  }
+  // each tab comes back to where it was scrolled
+  const leaving = activeTab();
+  if (leaving) leaving.scroll = main.scrollTop;
+  else state.overviewScroll = main.scrollTop;
+  state.activeTab = id;
+  view.overview.hidden = id != null;
+  for (const t of state.tabs) t.el.hidden = t.id !== id;
+  renderTabs();
+  if (state.board) renderBoard();
+
+  const tab = activeTab();
+  if (tab) {
+    renderMember(tab);
+    if (tab.stale) pollMember(tab);
+    main.scrollTop = tab.scroll;
+  } else {
+    if (state.overviewStale) relayoutOverview();
+    main.scrollTop = state.overviewScroll || 0;
+  }
+}
+
+function closeTab(id) {
+  const i = state.tabs.findIndex((t) => t.id === id);
+  if (i < 0) return;
+  const [tab] = state.tabs.splice(i, 1);
+  tab.el.remove();
+  saveTabs();
+  if (state.activeTab === id) {
+    // the tab to its left, or the run's own
+    openTab(state.tabs[i - 1]?.id ?? state.tabs[i]?.id ?? null);
+  } else {
+    renderTabs();
+    if (state.board) renderBoard();
+  }
+}
+
+function renderTabs() {
+  const item = (id, on, label, closable) =>
+    h(
+      "div",
+      {
+        class: `tab${on ? " on" : ""}`,
+        title: id == null ? "the run" : `#${id}`,
+        onclick: () => openTab(id),
+        // middle click closes, like a browser tab
+        onauxclick: (e) => e.button === 1 && closable && closeTab(id),
+      },
+      label,
+      closable &&
+        h("button", {
+          class: "x",
+          title: "close",
+          text: "×",
+          onclick: (e) => {
+            e.stopPropagation();
+            closeTab(id);
+          },
+        }),
+    );
+  view.tabbar.replaceChildren(
+    item(null, state.activeTab == null, h("span", { text: "run" }), false),
+    ...state.tabs.map((t) => {
+      const species = t.individual?.birth_species;
+      const label = h("span", {}, species != null && swatch(species), t.name ? nameEl(t.name) : `#${t.id}`);
+      return item(t.id, t.id === state.activeTab, label, true);
+    }),
+  );
+}
+
+// ---------------------------------------------------------------- member tab
+
+async function pollMember(tab) {
+  const runId = state.runId, depth = tab.depth;
+  let data;
+  try {
+    data = await api(`/api/runs/${runId}/individuals/${tab.id}?depth=${depth}`);
+  } catch (e) {
+    if (!String(e.message).startsWith("404")) return;
+    data = { missing: true, id: tab.id };
+  }
+  if (runId !== state.runId || !state.tabs.includes(tab) || depth !== tab.depth) return;
+  tab.stale = false;
+  // a new generation changes little about most members; skip redrawing when nothing did
+  if (JSON.stringify(data) === JSON.stringify(tab.individual)) return;
+  const named = !tab.individual;
+  tab.individual = data;
+  if (data.name && data.name !== tab.name) {
+    tab.name = data.name;
+    saveTabs();
+  }
+  if (named) renderTabs();
+  if (tab.id === state.activeTab) renderMember(tab);
+}
+
+function renderMember(tab) {
+  const ind = tab.individual;
+  if (!ind) {
+    tab.el.replaceChildren(h("div", { class: "card loading", text: "tracing…" }));
+    return;
+  }
+  if (ind.missing) {
+    tab.el.replaceChildren(h("div", { class: "card loading", text: `no genome #${ind.id} in this run` }));
+    return;
+  }
+  const sep = () => h("span", { class: "sep", text: "·" });
+  const [parent, mate] = ind.parents;
+  const nameOf = (id) => ind.pedigree.nodes.find((n) => n.id === id)?.name;
+  const parentage =
+    parent < 0
+      ? h("span", { text: "founder" })
+      : h(
+          "span",
+          {},
+          "child of ",
+          genomeLink(parent, nameOf(parent)),
+          mate >= 0 && mate !== parent && [" × ", genomeLink(mate, nameOf(mate))],
+        );
+  const share = ind.population ? ` (${Math.round((100 * ind.descendants) / ind.population)}%)` : "";
+  const tile = (lab, val) => h("div", { class: "tile" }, h("div", { class: "lab", text: lab }), h("div", { class: "val", text: val }));
+
+  const head = h(
+    "div",
+    { class: "card ind" },
+    h(
+      "div",
+      { class: "ind-head" },
+      swatch(ind.birth_species),
+      h("h2", {}, nameEl(ind.name)),
+      h("span", { class: "gid", text: `#${ind.id}` }),
+      ind.champion && h("span", { class: "tag", text: "champion" }),
+    ),
+    h(
+      "div",
+      { class: "ind-meta" },
+      h("span", { text: ind.species_name }),
+      ind.species !== ind.birth_species && h("span", { class: "dim", text: `(born ${state.speciesNames[ind.birth_species] ?? ind.birth_species})` }),
+      sep(),
+      h("span", { text: ind.alive ? `alive, born gen ${ind.born}` : `gen ${ind.born}–${ind.last}` }),
+      sep(),
+      parentage,
+    ),
+  );
+  const tiles = h(
+    "div",
+    { class: "tiles" },
+    tile("fitness", fmt(ind.fitness)),
+    tile("best fitness", fmt(ind.best)),
+    tile("generations", ind.age),
+    tile("children", ind.children),
+    tile("living descendants", `${ind.descendants}${share}`),
+    ind.champion_gens > 0 && tile("gens as champion", ind.champion_gens),
+  );
+
+  const depthCtl = h(
+    "span",
+    { class: "scrub" },
+    h("button", { title: "fewer generations", text: "‹", disabled: tab.depth <= 1, onclick: () => setDepth(tab, tab.depth - PEDIGREE_STEP) }),
+    h("span", { class: "pos", text: `${tab.depth} gens back` }),
+    h("button", { title: "more generations", text: "›", disabled: !ind.pedigree.deeper, onclick: () => setDepth(tab, tab.depth + PEDIGREE_STEP) }),
+  );
+  const pedBody = h("div", { class: "ped-scroll" });
+  const pedigree = h(
+    "div",
+    { class: "card" },
+    h("div", { class: "card-hdr" }, h("span", { class: "title", text: "pedigree" }), h("span", { class: "spacer" }), depthCtl),
+    pedBody,
+    h("div", { class: "net-foot", text: "fitter parent solid, mate dashed, line of descent highlighted · ringed members have been champion · click one to open it" }),
+  );
+
+  const popSeries = (key, name, color) => ({
+    name,
+    color,
+    points: state.rows.filter((r) => r[key] != null).map((r) => [r.step, r[key]]),
+  });
+  const chart = seriesCard("fitness along the line of descent", [
+    { name: "line of descent", color: "var(--s1)", points: ind.line_fitness },
+    popSeries("max_fitness", "population max", "var(--s2)"),
+    popSeries("mean_fitness", "population mean", "var(--s3)"),
+  ].filter((s) => s.points.length));
+
+  // pinned when first shown, so the cards don't change under the reader as
+  // generations go by
+  if (tab.step == null) tab.step = ind.last;
+  const cards = memberCards(tab);
+
+  const line = h(
+    "div",
+    { class: "card" },
+    h("div", { class: "card-hdr" }, h("span", { class: "title", text: `line of descent · ${ind.line.length - 1} fitter parents back to a founder` })),
+    h(
+      "div",
+      { class: "board-wrap short" },
+      h(
+        "table",
+        { class: "board" },
+        h("thead", {}, h("tr", {}, h("th", { class: "num", text: "born" }), h("th", { text: "individual" }), h("th", { class: "num", text: "gens" }), h("th", { class: "num", text: "best" }), h("th", { text: "mate" }))),
+        h(
+          "tbody",
+          {},
+          [...ind.line].reverse().map((a) =>
+            h(
+              "tr",
+              { class: a.id === ind.id ? "sel" : null },
+              h("td", { class: "num dim", text: a.born }),
+              h("td", {}, swatch(a.birth_species), a.id === ind.id ? nameEl(a.name) : genomeLink(a.id, a.name)),
+              h("td", { class: "num", text: a.age }),
+              h("td", { class: "num", text: fmt(a.best) }),
+              h("td", {}, a.mate ? genomeLink(a.mate.id, a.mate.name) : h("span", { class: "dim", text: a.parents[0] < 0 ? "founder" : "–" })),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  const kids = ind.child_list;
+  const children =
+    kids.length > 0 &&
+    h(
+      "div",
+      { class: "card" },
+      h("div", { class: "card-hdr" }, h("span", { class: "title", text: `children · ${ind.children}, fittest first` })),
+      h(
+        "div",
+        { class: "chips" },
+        kids.map((c) => h("span", { class: `chip${c.alive ? "" : " gone"}` }, swatch(c.birth_species), genomeLink(c.id, c.name), h("span", { class: "dim", text: fmt(c.best) }))),
+        ind.children > kids.length && h("span", { class: "dim", text: `and ${ind.children - kids.length} more` }),
+      ),
+    );
+
+  const scrolled = main.scrollTop;
+  tab.el.replaceChildren(
+    ...[
+      head,
+      tiles,
+      h("div", { class: "lineage-grid" }, cards.network.el, cards.episode.el),
+      // its family, below what it is and does
+      h("div", { class: "stitle", text: "Lineage" }),
+      pedigree,
+      h("div", { class: "lineage-grid" }, chart, line),
+      children,
+    ].filter(Boolean),
+  );
+  if (tab.id === state.activeTab) main.scrollTop = scrolled;
+  loadMemberCards(tab);
+  requestAnimationFrame(() => {
+    pedBody.replaceChildren(pedigreeView(ind, pedBody.clientWidth));
+    // the member itself is on the right; start there
+    pedBody.scrollLeft = pedBody.scrollWidth;
+  });
+}
+
+// the member's network and episodes, in the generation tab.step. Made once per
+// tab and kept across redraws, so an episode that's playing isn't restarted by
+// every new generation; hidden for runs that didn't log them
+function memberCards(tab) {
+  if (tab.cards) return tab.cards;
+  const card = () => {
+    const c = { hdr: h("div", { class: "card-hdr" }), body: h("div", { class: "media-body" }), foot: h("div"), shown: null };
+    c.el = h("div", { class: "card" }, c.hdr, c.body, c.foot);
+    c.el.hidden = true;
+    return c;
+  };
+  tab.cards = { network: card(), episode: card() };
+  return tab.cards;
+}
+
+function loadMemberCards(tab) {
+  loadNetwork(tab, tab.cards.network);
+  loadEpisodes(tab, tab.cards.episode);
+}
+
+// the member's network or episodes ("network" or "episodes") in tab.step: null
+// if there are none, undefined if the reader moved on while fetching
+async function memberData(tab, kind) {
+  const runId = state.runId, step = tab.step;
+  const key = `${kind}@${step}`;
+  if (!tab.data[key]) {
+    let data = null;
+    try {
+      data = await api(`/api/runs/${runId}/individuals/${tab.id}/${kind}?step=${step}`);
+    } catch {
+      // not logged (or not yet)
+    }
+    if (data) tab.data[key] = data;
+    if (runId !== state.runId || !state.tabs.includes(tab) || step !== tab.step) return undefined;
+    return data;
+  }
+  return tab.data[key];
+}
+
+// steps through the generations of the member's life; moves both cards together
+function stepScrub(tab, steps, step) {
+  const last = tab.individual.last;
+  if (steps.length < 2 && step === last) return h("span", { class: "latest", text: `gen ${step}` });
+  const idx = steps.indexOf(step);
+  const go = (s) => {
+    tab.step = s;
+    loadMemberCards(tab);
+  };
+  return h(
+    "span",
+    { class: "scrub" },
+    h("button", { onclick: () => go(steps[idx - 1]), disabled: idx <= 0, title: "previous", text: "‹" }),
+    h("span", { class: "pos", text: `gen ${step}` }),
+    h("button", { onclick: () => go(steps[idx + 1]), disabled: idx >= steps.length - 1, title: "next", text: "›" }),
+    h("button", { class: step === last ? "on" : null, onclick: () => go(last), title: "its latest generation", text: "latest" }),
+  );
+}
+
+async function loadNetwork(tab, card) {
+  const net = await memberData(tab, "network");
+  if (net === undefined) return;
+  card.el.hidden = !net;
+  if (!net) return;
+  card.hdr.replaceChildren(h("span", { class: "title", text: "network" }), h("span", { class: "spacer" }), stepScrub(tab, net.steps, net.step));
+  requestAnimationFrame(() => {
+    const { svg, summary } = networkView(net, card.body.clientWidth - 22);
+    card.body.replaceChildren(svg);
+    card.foot.replaceChildren(h("div", { class: "net-foot", text: summary }));
+  });
+}
+
+// two-player games: which side the member played, in the renderers' colours
+const SEATS = [
+  { name: "left", color: "var(--s1)" },
+  { name: "right", color: "var(--s2)" },
+];
+
+// a player of a two-player game, marked with its side's colour in the picture
+function seatPlayer(who, seat) {
+  return h(
+    "span",
+    { class: "ep-player" },
+    h("i", { class: "swatch", style: `background:${SEATS[seat].color}` }),
+    who,
+    h("span", { class: "seat", text: SEATS[seat].name }),
+  );
+}
+
+async function loadEpisodes(tab, card) {
+  const eps = await memberData(tab, "episodes");
+  if (eps === undefined) return;
+  card.el.hidden = !eps?.episodes.length;
+  if (card.el.hidden) return;
+  // a two-player task shows each side the same view of the game (slimevolley
+  // mirrors observations), so one game is enough: the member's own, the one it's
+  // seated first in, unless it was opened on another
+  const ep =
+    eps.episodes.find((e) => e.index === tab.game) ||
+    eps.episodes.find((e) => e.seat === 0) ||
+    eps.episodes[0];
+  card.hdr.replaceChildren(
+    h("span", { class: "title", text: "episode" }),
+    h("span", { class: "spacer" }),
+    stepScrub(tab, eps.steps, eps.step),
+  );
+  // two-player games: say who played which side, in the order and colours of the
+  // picture; the opponent opens on this same game
+  const twoPlayer = ep.players.length === 2;
+  const player = (p, seat) =>
+    seatPlayer(
+      p.id === tab.id
+        ? h("b", {}, nameEl(p.name || `#${p.id}`))
+        : p.name
+          ? genomeLink(p.id, p.name, { step: eps.step, game: ep.index })
+          : `#${p.id}`,
+      seat,
+    );
+  const matchup =
+    twoPlayer &&
+    h("div", { class: "ep-games" }, h("span", { class: "ep-match" }, player(ep.players[0], 0), h("span", { class: "dim", text: "vs" }), player(ep.players[1], 1)));
+  card.foot.replaceChildren(...[matchup].filter(Boolean));
+  // swapping the image restarts the gif, so only when the episode changes
+  const src = `/api/runs/${state.runId}/member_episodes/${eps.step}/${ep.index}`;
+  if (card.shown === src) return;
+  card.shown = src;
+  card.body.replaceChildren(h("div", { class: "loading", text: "rendering…" }));
+  const img = h("img", { alt: `episode at gen ${eps.step}` });
+  img.addEventListener("load", () => card.shown === src && card.body.replaceChildren(img));
+  img.addEventListener("error", () => {
+    if (card.shown === src) card.body.replaceChildren(h("div", { class: "media-error", text: "couldn't render this episode" }));
+  });
+  img.src = src;
+}
+
+function setDepth(tab, depth) {
+  tab.depth = Math.max(1, Math.min(48, depth));
+  pollMember(tab);
+}
+
+// ancestors laid out left to right by the generation they were born in, with the
+// line of descent straight across the middle
+function pedigreeView(ind, width) {
+  const nodes = new Map(ind.pedigree.nodes.map((n) => [n.id, { ...n }]));
+  const kids = new Map();
+  for (const n of nodes.values()) {
+    for (const p of new Set(n.parents)) {
+      if (!nodes.has(p)) continue;
+      if (!kids.has(p)) kids.set(p, []);
+      kids.get(p).push(n);
+    }
+  }
+  const steps = [...new Set([...nodes.values()].map((n) => n.born))].sort((a, b) => a - b);
+  const COL = 96, GAP = 24, PADX = 72, PADY = 28, AXIS = 16;
+  const W = Math.max(width, PADX * 2 + (steps.length - 1) * COL);
+  const colX = (i) => (steps.length === 1 ? W / 2 : PADX + (i * (W - 2 * PADX)) / (steps.length - 1));
+
+  // newest first, so each column can line up behind the children it already placed
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const col = [...nodes.values()].filter((n) => n.born === steps[i]);
+    for (const n of col) {
+      const ys = (kids.get(n.id) || []).map((k) => k.y);
+      n.bary = ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : 0;
+    }
+    col.sort((a, b) => a.bary - b.bary || a.id - b.id);
+    const anchor = col.findIndex((n) => n.on_line);
+    const mid = col.reduce((a, n) => a + n.bary, 0) / col.length;
+    const top = anchor >= 0 ? -anchor * GAP : mid - ((col.length - 1) * GAP) / 2;
+    col.forEach((n, j) => {
+      n.x = colX(i);
+      n.y = top + j * GAP;
+      n.col = i;
+    });
+  }
+  const ys = [...nodes.values()].map((n) => n.y);
+  const lo = Math.min(...ys), hi = Math.max(...ys);
+  const H = hi - lo + 2 * PADY + AXIS;
+  for (const n of nodes.values()) n.y += PADY - lo;
+
+  const svg = h("svg", { class: "ped", viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+  steps.forEach((st, i) => svg.append(h("text", { class: "gen", x: colX(i), y: H - 4, "text-anchor": "middle", text: `gen ${st}` })));
+
+  const edgeEls = [];
+  for (const n of nodes.values()) {
+    [...new Set(n.parents)].forEach((pid) => {
+      const p = nodes.get(pid);
+      if (!p) return;
+      const fitter = pid === n.parents[0];
+      const cls = fitter && p.on_line && n.on_line ? "line" : fitter ? "primary" : "mate";
+      const mx = (p.x + n.x) / 2;
+      const el = h("path", { class: `edge ${cls}`, d: `M${p.x},${p.y} C${mx},${p.y} ${mx},${n.y} ${n.x},${n.y}` });
+      el.dataset.from = pid;
+      el.dataset.to = n.id;
+      edgeEls.push(el);
+      svg.append(el);
+    });
+  }
+  for (const n of nodes.values()) {
+    const subject = n.id === ind.id;
+    if (n.champion_gens > 0) svg.append(h("circle", { class: "champ", cx: n.x, cy: n.y, r: subject ? 10.5 : 8.5 }));
+    const node = h("circle", {
+      class: `node${subject ? " subject" : ""}`,
+      cx: n.x,
+      cy: n.y,
+      r: subject ? 7 : 5,
+      fill: speciesColor(n.birth_species),
+    });
+    node.addEventListener("pointerenter", (ev) => {
+      for (const el of edgeEls) el.classList.toggle("dim", el.dataset.from != n.id && el.dataset.to != n.id);
+      showTip(
+        ev.clientX,
+        ev.clientY,
+        h("div", { class: "head", text: n.name }),
+        h("div", { class: "row" }, `#${n.id} · ${n.species_name} · gen ${n.born}${n.last > n.born ? `–${n.last}` : ""}`),
+        h("div", { class: "row" }, "best ", h("b", { text: fmt(n.best) }), ` · ${n.children} children`),
+      );
+    });
+    node.addEventListener("pointerleave", () => {
+      edgeEls.forEach((el) => el.classList.remove("dim"));
+      hideTip();
+    });
+    if (!subject) {
+      node.addEventListener("click", () => {
+        hideTip();
+        openTab(n.id, { name: n.name });
+      });
+    }
+    svg.append(node);
+    // name the line of descent, alternating above and below so neighbours don't collide
+    if (n.on_line) {
+      const below = (steps.length - 1 - n.col) % 2 === 0;
+      svg.append(
+        h("text", {
+          class: `lab${subject ? " subject" : ""}`,
+          x: n.x,
+          y: below ? n.y + (subject ? 19 : 16) : n.y - (subject ? 12 : 10),
+          "text-anchor": "middle",
+          text: n.name,
+        }),
+      );
+    }
+  }
+  return svg;
 }
 
 // ---------------------------------------------------------------- config

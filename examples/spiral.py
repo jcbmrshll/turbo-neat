@@ -22,6 +22,7 @@ import neat.activations as act
 from monitor import DEFAULT_URL, Episode, Monitor
 from neat.backprop_neat import BackpropNEAT
 from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
+from neat.fitness import Recording
 from neat.genome import Genome, forward
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
 from neat.utils import apply
@@ -78,9 +79,11 @@ def sigmoid_binary_cross_entropy(logits: jax.Array, labels: jax.Array) -> jax.Ar
     return -labels * log_p - (1 - labels) * log_not_p
 
 
-def make_backprop_fn(generate: Callable) -> Callable:
+def make_backprop_fn(generate: Callable, record: bool = False) -> Callable:
     """Fitness is the negative loss on a fresh batch; also returns the gradients of
-    the loss with respect to each genome's weights and biases."""
+    the loss with respect to each genome's weights and biases, and, if record, a
+    Recording of each genome's batch with its predicted probabilities, shaped like
+    the test's (genomes, points, 3) with one genome per episode."""
 
     def backprop_fn(rng, genome: Genome, **kwargs):
         rng_batch = jax.random.split(rng, genome.batch_size)
@@ -91,12 +94,18 @@ def make_backprop_fn(generate: Callable) -> Callable:
                 gen, graph=replace(gen.graph, weights=weights), node_biases=biases
             )
             logits = forward(gen, data, **kwargs, diff_mode=True)
-            return sigmoid_binary_cross_entropy(logits.squeeze(-1), labels).mean()
+            loss = sigmoid_binary_cross_entropy(logits.squeeze(-1), labels).mean()
+            return loss, logits
 
-        loss, grads = jax.vmap(jax.value_and_grad(loss_fn, argnums=(0, 1)))(
+        value_and_grad = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
+        (loss, logits), grads = jax.vmap(value_and_grad)(
             genome.graph.weights, genome.node_biases, genome, data, labels
         )
-        return -loss, grads
+        if not record:
+            return -loss, grads
+        frames = jnp.concatenate([data, jax.nn.sigmoid(logits)], axis=-1)[:, None]
+        players = jnp.arange(genome.batch_size)[:, None]
+        return -loss, grads, Recording(frames, players)
 
     return backprop_fn
 
@@ -178,10 +187,12 @@ def make_config() -> NEATConfig:
 
 
 def episode_fn(data):
-    """The test points with the best genome's predicted probabilities, for the monitor
-    to plot."""
-    data = data.reshape(-1, 3)
-    return Episode("classification_2d", points=data[:, :2], probability=data[:, 2])
+    """Points with a genome's predicted probabilities, for the monitor to plot. data
+    is (..., genomes, points, 3) and each plot merges its genomes (the test's copies
+    of the best genome); a leading axis, as in the members' recorded batches, makes
+    one plot each."""
+    data = data.reshape(data.shape[:-3] + (-1, 3))
+    return Episode("classification_2d", points=data[..., :2], probability=data[..., 2])
 
 
 def main():
@@ -204,7 +215,8 @@ def main():
     generate = DATASETS[args.dataset]
     bneat = BackpropNEAT(
         make_config(),
-        backprop_fn=make_backprop_fn(generate),
+        # record each member's scored batch for the monitor's member view
+        backprop_fn=make_backprop_fn(generate, record=args.monitor is not None),
         test_fn=make_test_fn(generate),
         monitor=Monitor(args.monitor, project="spiral") if args.monitor else None,
     )

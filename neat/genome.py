@@ -70,6 +70,10 @@ class Genome:
     condensed_size: jax.Array
     fitness: jax.Array
     species_id: jax.Array
+    # who this genome is: elites keep their id from generation to generation, offspring
+    # get a new one, and record their parents' ids (the fitter parent first), or -1
+    genome_id: jax.Array
+    parent_ids: jax.Array
     # static: shared by every genome in a batch, and constant under jit
     # nodes [0, input_size) are the inputs, the next output_size nodes are the outputs
     input_size: int = field(metadata=dict(static=True))
@@ -828,11 +832,16 @@ def init_genome(
         node_biases=biases,
         fitness=jnp.float32(jnp.finfo(jnp.float32).min),
         species_id=jnp.int32(0),
+        genome_id=jnp.int32(0),
+        parent_ids=jnp.full(2, -1, dtype=jnp.int32),
         num_initial_connections=jnp.int32(0),
     )
     batch_rng = jax.random.split(rng, batch_size)
     batched_genome = jax.tree.map(
         lambda x: jnp.broadcast_to(x, (batch_size,) + x.shape), genome
+    )
+    batched_genome = replace(
+        batched_genome, genome_id=jnp.arange(batch_size, dtype=jnp.int32)
     )
     if mode == "full":
         num_conns = input_size * output_size
