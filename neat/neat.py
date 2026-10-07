@@ -415,7 +415,7 @@ class NEAT:
                     )
                     results["fitness_against_baseline"] = test_fitness
 
-            # the fittest racing each other, every field_every generations
+            # the fittest playing each other, every field_every generations
             if self.test_field and g % self.field_every == 0:
                 test_rng, rng = jax.random.split(rng)
                 field_scores, field_episode, field_ids = self.test_field(
