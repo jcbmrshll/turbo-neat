@@ -43,29 +43,43 @@ def fitness(
     genome: Genome,
     num_steps: int,
     frames_len: int,
+    num_episodes: int = 1,
     record: bool = False,
     **kwargs,
 ) -> Tuple[jax.Array, Any]:
-    """Returns the total reward of each genome, and either a Recording of every
+    """Returns the total reward of each genome, averaged over num_episodes episodes
+    from different starts, and from the first of them either a Recording of every
     genome's episode (if record) or the first genome's first frames_len frames."""
-    task_state = reset_fn(jax.random.split(rng, genome.batch_size))
-    state = FitnessState(
-        task_state=task_state,
-        reward=jnp.zeros(genome.batch_size, dtype=jnp.float32),
-    )
 
-    def game_step(state, _):
-        actions = apply(genome, forward, state.task_state.obs, **kwargs)
-        task_state, rewards, _ = step_fn(state.task_state, actions)
-        return FitnessState(
-            task_state=task_state, reward=state.reward + rewards
-        ), task_state
+    def episode(rng, record):
+        task_state = reset_fn(jax.random.split(rng, genome.batch_size))
+        state = FitnessState(
+            task_state=task_state,
+            reward=jnp.zeros(genome.batch_size, dtype=jnp.float32),
+        )
 
-    state, task_state_frames = jax.lax.scan(game_step, state, jnp.zeros(num_steps))
+        def game_step(state, _):
+            actions = apply(genome, forward, state.task_state.obs, **kwargs)
+            task_state, rewards, _ = step_fn(state.task_state, actions)
+            # every genome's states if recording, else just the first genome's
+            frame = task_state if record else jax.tree.map(lambda x: x[0], task_state)
+            return FitnessState(
+                task_state=task_state, reward=state.reward + rewards
+            ), frame
+
+        state, frames = jax.lax.scan(game_step, state, jnp.zeros(num_steps))
+        return state.reward, frames
+
+    reward, frames = episode(rng, record)
+    if num_episodes > 1:
+        # the rest of the episodes only count towards fitness
+        rngs = jax.random.split(jax.random.fold_in(rng, 1), num_episodes - 1)
+        rewards, _ = jax.vmap(partial(episode, record=False))(rngs)
+        reward = (reward + rewards.sum(axis=0)) / num_episodes
     if record:
         players = jnp.arange(genome.batch_size)[:, None]
-        return state.reward, Recording(_episode_major(task_state_frames), players)
-    return state.reward, jax.tree.map(lambda x: x[:frames_len, 0], task_state_frames)
+        return reward, Recording(_episode_major(frames), players)
+    return reward, jax.tree.map(lambda x: x[:frames_len], frames)
 
 
 class TwoPlayerTask(Protocol):
@@ -202,9 +216,13 @@ def make_fitness_fn(
     task: VectorizedTask,
     num_steps: int,
     frames_len: Optional[int] = None,
+    num_episodes: int = 1,
     record: bool = False,
 ) -> Callable:
+    """Fitness is the total reward over num_steps, averaged over num_episodes from
+    different starts; see fitness() for the auxiliary data."""
     assert num_steps > 0, "num_steps must be greater than 0"
+    assert num_episodes > 0, "num_episodes must be greater than 0"
     if frames_len is None:
         frames_len = num_steps
     frames_len = min(frames_len, num_steps)
@@ -214,6 +232,7 @@ def make_fitness_fn(
         reset_fn=task.reset,
         num_steps=num_steps,
         frames_len=frames_len,
+        num_episodes=num_episodes,
         record=record,
     )
 
