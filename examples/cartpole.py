@@ -1,14 +1,15 @@
 """Evolve a policy for EvoJAX's cart-pole swing-up task.
 
 The pole starts hanging below the cart; the policy pushes the cart left or right to
-swing it up and balance it there, without running off the end of the track. Each
-step scores up to 1 for a pole that's upright over a centered cart, so a perfect
+swing it up and balance it there; running off the end of the track ends the
+episode. Each step scores up to 1 for a pole that's upright over a centered cart, so a perfect
 1000-step episode scores just under 1000. Each genome's fitness is averaged over a
 few episodes from different starts; on one, a lucky start can outscore a better
 policy.
 
 Expect the champion's average score over 1000 test episodes to pass 800 within the
-first 100 generations, which take a few minutes on a GPU.
+first 100 generations, which take a few minutes on a GPU. This config isn't tuned
+for --harder yet: there it stalls at about 400.
 
     uv run examples/cartpole.py --generations 100
     uv run examples/cartpole.py --harder        # random starts, anywhere on the track

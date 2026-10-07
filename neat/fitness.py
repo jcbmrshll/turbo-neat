@@ -34,6 +34,17 @@ def _episode_major(frames: Any) -> Any:
 class FitnessState:
     task_state: jax.Array
     reward: jax.Array
+    # false once a genome's episode is done
+    alive: jax.Array
+
+
+def _keep_where(mask: jax.Array, new: Any, old: Any) -> Any:
+    """new where mask, else old, for every leaf of a batched pytree."""
+    return jax.tree.map(
+        lambda n, o: jnp.where(mask.reshape(mask.shape + (1,) * (n.ndim - 1)), n, o),
+        new,
+        old,
+    )
 
 
 def fitness(
@@ -49,22 +60,31 @@ def fitness(
 ) -> Tuple[jax.Array, Any]:
     """Returns the total reward of each genome, averaged over num_episodes episodes
     from different starts, and from the first of them either a Recording of every
-    genome's episode (if record) or the first genome's first frames_len frames."""
+    genome's episode (if record) or the first genome's first frames_len frames.
+
+    An episode ends at the task's first done, like evojax's rollouts: the reward
+    stops counting and the task state is held there, rather than playing on from
+    the start the task resets to."""
 
     def episode(rng, record):
         task_state = reset_fn(jax.random.split(rng, genome.batch_size))
         state = FitnessState(
             task_state=task_state,
             reward=jnp.zeros(genome.batch_size, dtype=jnp.float32),
+            alive=jnp.ones(genome.batch_size, dtype=bool),
         )
 
         def game_step(state, _):
             actions = apply(genome, forward, state.task_state.obs, **kwargs)
-            task_state, rewards, _ = step_fn(state.task_state, actions)
+            task_state, rewards, done = step_fn(state.task_state, actions)
+            reward = state.reward + jnp.where(state.alive, rewards, 0)
+            alive = state.alive & ~done.astype(bool)
+            # the step that ends an episode resets the task; keep its last state
+            task_state = _keep_where(alive, task_state, state.task_state)
             # every genome's states if recording, else just the first genome's
             frame = task_state if record else jax.tree.map(lambda x: x[0], task_state)
             return FitnessState(
-                task_state=task_state, reward=state.reward + rewards
+                task_state=task_state, reward=reward, alive=alive
             ), frame
 
         state, frames = jax.lax.scan(game_step, state, jnp.zeros(num_steps))
