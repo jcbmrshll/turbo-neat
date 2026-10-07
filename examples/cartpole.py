@@ -25,7 +25,7 @@ from evojax.task.cartpole import DELTA_T, CartPoleSwingUp
 import neat.activations as act
 from monitor import DEFAULT_URL, Episode, Monitor
 from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
-from neat.fitness import make_fitness_fn
+from neat.fitness import make_fitness_fn, make_test_fn
 from neat.neat import NEAT
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
 
@@ -128,7 +128,9 @@ def main():
             num_episodes=NUM_EPISODES,
             record=args.monitor is not None,
         ),
-        baseline_test_fn=make_fitness_fn(task=test_task, num_steps=NUM_STEPS),
+        baseline_test_fn=make_test_fn(
+            task=test_task, num_steps=NUM_STEPS, num_episodes=1000
+        ),
         monitor=Monitor(args.monitor, project="cartpole") if args.monitor else None,
     )
     neat.run(seed=args.seed, num_generations=args.generations, episode_fn=episode_fn)

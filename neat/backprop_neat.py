@@ -10,7 +10,7 @@ from neat.activations import ActivationSelector
 from neat.config import NEATConfig
 from neat.fitness import Recording
 from neat.genome import Genome, prepare_for_inference
-from neat.neat import NEAT, FitnessFn, evolve_one_generation, test_against_baseline
+from neat.neat import NEAT, TestFn, evolve_one_generation, test_against_baseline
 from neat.population import Population
 
 # called like a FitnessFn on a fresh batch of data; returns fitness (-loss) and
@@ -96,7 +96,7 @@ class BackpropNEAT(NEAT):
         self,
         config: NEATConfig,
         backprop_fn: BackpropFn,
-        test_fn: Optional[FitnessFn] = None,
+        test_fn: Optional[TestFn] = None,
         monitor: Optional[Monitor] = None,
     ):
         self.config = config
