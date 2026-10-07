@@ -21,6 +21,8 @@ const HEADLINE = [
 // charts that lead the grid; the rest follow in the order they were first logged
 const CHART_ORDER = ["fitness", "fitness_against_baseline", "challenger_fitness"];
 const BOARD_LIMIT = 50;
+// the windows offered over the metric charts, in generations
+const CHART_WINDOWS = [50, 200, 1000];
 // how many generations of parents the pedigree starts with, and steps by
 const PEDIGREE_DEPTH = 6;
 const PEDIGREE_STEP = 3;
@@ -49,6 +51,9 @@ const state = {
   overviewStale: false,
   // step -> that generation's champion ({id, name, birth_species})
   champions: new Map(),
+  // the metric charts show the last this-many generations, or all of them if
+  // null; kept across runs and reloads
+  chartWindow: Number(localStorage.getItem("chartWindow")) || null,
 };
 
 // ---------------------------------------------------------------- helpers
@@ -277,7 +282,7 @@ async function select(runId) {
     tiles: h("div", { class: "tiles" }),
     mediaTitle: h("div", { class: "stitle", text: "Champion" }),
     media: h("div", { class: "media-grid" }),
-    chartsTitle: h("div", { class: "stitle", text: "Metrics" }),
+    chartsTitle: h("div", { class: "stitle-row" }),
     charts: h("div", { class: "chart-grid" }),
     configTitle: h("div", { class: "stitle", text: "Config" }),
     config: h("div", { class: "config-grid" }),
@@ -292,6 +297,7 @@ async function select(runId) {
     view.configTitle,
     view.config,
   );
+  renderChartsTitle();
   main.replaceChildren(h("div", { class: "page" }, view.head, view.tabbar, view.overview, view.panels));
   main.scrollTop = 0;
   // the member tabs this run had open, then the one in the address
@@ -451,10 +457,52 @@ function metricKeys() {
 function renderCharts() {
   const groups = groupMetrics(metricKeys());
   view.chartsTitle.hidden = !groups.length;
-  view.charts.replaceChildren(...groups.map(chartCard));
+  // the window ends at the newest generation logged
+  const last = state.rows.at(-1)?.step;
+  const from = state.chartWindow && last != null ? last - state.chartWindow + 1 : -Infinity;
+  view.charts.replaceChildren(...groups.map((g) => chartCard(g, from)));
 }
 
-function chartCard(group) {
+function setChartWindow(n) {
+  state.chartWindow = n > 0 ? Math.floor(n) : null;
+  if (state.chartWindow) localStorage.setItem("chartWindow", state.chartWindow);
+  else localStorage.removeItem("chartWindow");
+  renderChartsTitle();
+  if (state.rows.length) renderCharts();
+}
+
+// "Metrics", and the window of generations the charts show: all, a preset, or any N
+function renderChartsTitle() {
+  const win = state.chartWindow;
+  const toggle = (n, text, title) =>
+    h("button", { class: win === n ? "on" : null, text, title, onclick: () => setChartWindow(n) });
+  const custom = h("input", {
+    type: "number",
+    min: 1,
+    step: 1,
+    placeholder: "N",
+    title: "show the last N generations",
+    value: win && !CHART_WINDOWS.includes(win) ? win : null,
+    class: win && !CHART_WINDOWS.includes(win) ? "on" : null,
+    onchange: (e) => setChartWindow(Number(e.target.value)),
+    onkeydown: (e) => e.key === "Enter" && e.target.blur(),
+  });
+  view.chartsTitle.replaceChildren(
+    h("div", { class: "stitle", text: "Metrics" }),
+    h("span", { class: "spacer" }),
+    h(
+      "span",
+      { class: "scrub" },
+      h("span", { class: "dim", text: "last" }),
+      toggle(null, "all", "every generation"),
+      CHART_WINDOWS.map((n) => toggle(n, fmt(n), `the last ${n} generations`)),
+      custom,
+      h("span", { class: "dim", text: "gens" }),
+    ),
+  );
+}
+
+function chartCard(group, from) {
   const series = group.series.map((s, i) => {
     // species_*/s<id> series are named and coloured after their species
     const species = group.name.startsWith("species_") && s.name.match(/^s(\d+)$/);
@@ -462,7 +510,7 @@ function chartCard(group) {
       ...s,
       name: species ? state.speciesNames[species[1]] || s.name : s.name,
       color: species ? speciesColor(Number(species[1])) : SERIES[i % SERIES.length],
-      points: state.rows.filter((r) => r[s.key] != null).map((r) => [r.step, r[s.key]]),
+      points: state.rows.filter((r) => r[s.key] != null && r.step >= from).map((r) => [r.step, r[s.key]]),
     };
   });
   const single = series.length === 1;
