@@ -145,3 +145,4 @@ class BackpropNEAT(NEAT):
             self.test_baseline = None
 
         self.test_champion = None
+        self.test_field = None

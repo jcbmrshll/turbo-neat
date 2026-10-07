@@ -13,6 +13,34 @@ class Video:
 
     frames: List[Any]
     fps: int = 25
+    # RGB colours the gif must keep exactly, for pictures with small details in
+    # their own colours: its palette is otherwise picked from each frame's most
+    # common colours, which can leave a few pixels of one colour none of their own
+    keep_colors: Optional[List[Tuple[int, int, int]]] = None
+
+
+def _quantize(frames: List[Any], keep: List[Tuple[int, int, int]]) -> List[Any]:
+    """Frames in one 256-colour palette: the colours to keep, and the rest picked
+    from a sample of the frames, for everything in between (antialiased edges)."""
+    from PIL import Image
+
+    keep = list(dict.fromkeys(tuple(c) for c in keep))[:256]
+    colors = [c for rgb in keep for c in rgb]
+    room = 256 - len(keep)
+    if room:
+        sample = [f.convert("RGB") for f in frames[:: max(1, len(frames) // 16)]]
+        width, height = sample[0].size
+        strip = Image.new("RGB", (width, height * len(sample)))
+        for i, frame in enumerate(sample):
+            strip.paste(frame, (0, i * height))
+        rest = strip.quantize(colors=room).getpalette() or []
+        colors += rest[: 3 * room]
+    palette = Image.new("P", (1, 1))
+    palette.putpalette(colors + colors[:3] * (256 - len(colors) // 3))
+    return [
+        f.convert("RGB").quantize(palette=palette, dither=Image.Dither.NONE)
+        for f in frames
+    ]
 
 
 def encode_media(value: Any) -> Optional[Tuple[str, bytes]]:
@@ -23,12 +51,15 @@ def encode_media(value: Any) -> Optional[Tuple[str, bytes]]:
         is_frames = bool(value) and hasattr(value[0], "save")
         return encode_media(Video(value)) if is_frames else None
     if isinstance(value, Video):
+        frames = value.frames
+        if value.keep_colors:
+            frames = _quantize(frames, value.keep_colors)
         buf = io.BytesIO()
-        value.frames[0].save(
+        frames[0].save(
             buf,
             format="GIF",
             save_all=True,
-            append_images=value.frames[1:],
+            append_images=frames[1:],
             duration=round(1000 / value.fps),
             loop=0,
         )

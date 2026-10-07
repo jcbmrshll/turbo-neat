@@ -198,6 +198,24 @@ def test_against_champion(
     return population, challenger_fitness, new_champion
 
 
+def test_field(
+    rng: jax.Array,
+    population: Population,
+    test_fn: FitnessFn,
+    field_size: int,
+    activation_selector: ActivationSelector,
+) -> Tuple[jax.Array, Any]:
+    """Test the field_size fittest genomes against each other: their scores, the
+    test's episode, and their genome ids, fittest first"""
+    genomes: Genome = population.batched_genome
+    fittest = jnp.argsort(-genomes.fitness)[:field_size]
+    field = jax.tree.map(lambda x: x[fittest], genomes)
+    scores, data = test_fn(
+        rng=rng, genome=field, activation_selector=activation_selector
+    )
+    return scores, data, field.genome_id
+
+
 class NEAT:
     """NEAT algorithm"""
 
@@ -211,6 +229,9 @@ class NEAT:
     ]
     test_baseline: Optional[Callable[[jax.Array, Population], Tuple[jax.Array, Any]]]
     map_species: Callable[[Genome], SpeciesPCA]
+    test_field: Optional[
+        Callable[[jax.Array, Population], Tuple[jax.Array, Any, jax.Array]]
+    ]
 
     def __init__(
         self,
@@ -219,7 +240,13 @@ class NEAT:
         h2h_test_fn: Optional[FitnessFn] = None,
         baseline_test_fn: Optional[FitnessFn] = None,
         monitor: Optional[Monitor] = None,
+        field_test_fn: Optional[FitnessFn] = None,
+        field_size: int = 0,
+        field_every: int = 1,
     ):
+        """field_test_fn, if given, tests the field_size fittest genomes of every
+        field_every-th generation (from the first) against each other, returning
+        each one's score and an episode, which goes to the monitor."""
         self.config = config
         self.activation_selector = config.genome_config.activation_selector
         self.monitor = monitor
@@ -254,6 +281,20 @@ class NEAT:
             )
         else:
             self.test_baseline = None
+        self.field_every = field_every
+        if field_test_fn is not None:
+            assert field_size > 0, "a field test needs a field_size"
+            assert field_every > 0, "field_every must be greater than 0"
+            self.test_field = jax.jit(
+                partial(
+                    test_field,
+                    test_fn=field_test_fn,
+                    field_size=field_size,
+                    activation_selector=self.activation_selector,
+                )
+            )
+        else:
+            self.test_field = None
 
     def run(
         self,
@@ -361,7 +402,7 @@ class NEAT:
                     )
 
             # test against baseline, keeping the episode for the monitor
-            episode_data = None
+            episode_data, episode_players = None, None
             if improved:
                 if self.monitor is not None:
                     results["network"] = genome_to_network(
@@ -377,6 +418,18 @@ class NEAT:
                         test_rng, population
                     )
                     results["fitness_against_baseline"] = test_fitness
+
+            # the fittest racing each other, every field_every generations
+            if self.test_field and g % self.field_every == 0:
+                test_rng, rng = jax.random.split(rng)
+                field_scores, field_episode, field_ids = self.test_field(
+                    test_rng, population
+                )
+                results["field_mean"] = field_scores.mean()
+                results["field_best"] = field_scores.max()
+                # the baseline's episode, if there is one, takes the monitor's slot
+                if episode_data is None:
+                    episode_data, episode_players = field_episode, field_ids
 
             # evolving re-sorts each graph by innovation, so keep the evaluated
             # population (graphs condensed, in topological order) for its networks
@@ -418,6 +471,7 @@ class NEAT:
                     evaluated.genome_id,
                     # on the device: only the map itself is copied off it
                     self.map_species(members),
+                    episode_players,
                 )
                 with jax.default_device(jax.devices("cpu")[0]):
                     if log_async:

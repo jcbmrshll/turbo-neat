@@ -17,7 +17,8 @@ class Recording:
     """What a fitness evaluation played, for the monitor: one episode per member (or
     per game, for two-player tasks).
 
-    frames is the task state at every step, with leading (episode, step) axes, and
+    frames is the task state at every recorded step, with leading (episode, step)
+    axes, and
     players holds the batch index of each genome playing each episode, shape
     (episodes, players)."""
 
@@ -28,6 +29,21 @@ class Recording:
 def _episode_major(frames: Any) -> Any:
     """Task states stacked by lax.scan, (step, episode, ...), as (episode, step, ...)."""
     return jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), frames)
+
+
+def _rollout(
+    step: Callable, carry: Any, num_steps: int, every: int, frame: Callable
+) -> Tuple[Any, Any]:
+    """step carry num_steps times, keeping frame(carry) after every `every` steps;
+    the final carry, and the frames stacked on a leading axis."""
+
+    def chunk(carry, _):
+        carry = jax.lax.fori_loop(0, every, lambda _, c: step(c), carry)
+        return carry, frame(carry)
+
+    carry, frames = jax.lax.scan(chunk, carry, length=num_steps // every)
+    carry = jax.lax.fori_loop(0, num_steps % every, lambda _, c: step(c), carry)
+    return carry, frames
 
 
 @jax.tree_util.register_dataclass
@@ -45,28 +61,34 @@ def fitness(
     num_steps: int,
     frames_len: int,
     record: bool = False,
+    frames_every: int = 1,
     **kwargs,
 ) -> Tuple[jax.Array, Any]:
     """Returns the total reward of each genome, and either a Recording of every
-    genome's episode (if record) or the first genome's first frames_len frames."""
+    genome's episode (if record) or the first genome's first frames_len steps;
+    either way, keeping the task state every frames_every steps."""
     task_state = reset_fn(jax.random.split(rng, genome.batch_size))
     state = FitnessState(
         task_state=task_state,
         reward=jnp.zeros(genome.batch_size, dtype=jnp.float32),
     )
 
-    def game_step(state, _):
+    def game_step(state):
         actions = apply(genome, forward, state.task_state.obs, **kwargs)
         task_state, rewards, _ = step_fn(state.task_state, actions)
-        return FitnessState(
-            task_state=task_state, reward=state.reward + rewards
-        ), task_state
+        return FitnessState(task_state=task_state, reward=state.reward + rewards)
 
-    state, task_state_frames = jax.lax.scan(game_step, state, jnp.zeros(num_steps))
+    # all of every genome's episode, or only the first's
+    def frame(state):
+        if record:
+            return state.task_state
+        return jax.tree.map(lambda x: x[0], state.task_state)
+
+    state, frames = _rollout(game_step, state, num_steps, frames_every, frame)
     if record:
         players = jnp.arange(genome.batch_size)[:, None]
-        return state.reward, Recording(_episode_major(task_state_frames), players)
-    return state.reward, jax.tree.map(lambda x: x[:frames_len, 0], task_state_frames)
+        return state.reward, Recording(_episode_major(frames), players)
+    return state.reward, jax.tree.map(lambda x: x[: frames_len // frames_every], frames)
 
 
 class TwoPlayerTask(Protocol):
@@ -229,21 +251,32 @@ def race(
     seated: Genome,
     num_games: int,
     num_steps: int,
+    record: bool = False,
+    record_every: int = 1,
+    record_fn: Optional[Callable] = None,
     **kwargs,
-) -> jax.Array:
+) -> Tuple[jax.Array, Any]:
     """Total reward of each seat over num_games games of num_steps, where seated is
-    a batch of genomes laid out as (games, seats) and flattened."""
+    a batch of genomes laid out as (games, seats) and flattened; and, if record,
+    every game's task state every record_every steps (or what record_fn keeps of
+    it), with leading (game, step) axes."""
     task_state = reset_fn(jax.random.split(rng, num_games))
 
-    def game_step(_, carry):
+    def game_step(carry):
         task_state, rewards = carry
         actions = apply_seats(seated, task_state.obs, **kwargs)
         task_state, step_rewards, _ = step_fn(task_state, actions)
         return task_state, rewards + step_rewards
 
-    rewards = jnp.zeros(task_state.obs.shape[:2])
-    _, rewards = jax.lax.fori_loop(0, num_steps, game_step, (task_state, rewards))
-    return rewards
+    carry = (task_state, jnp.zeros(task_state.obs.shape[:2]))
+    if record:
+        keep = record_fn or (lambda task_state: task_state)
+        (_, rewards), frames = _rollout(
+            game_step, carry, num_steps, record_every, lambda carry: keep(carry[0])
+        )
+        return rewards, _episode_major(frames)
+    _, rewards = jax.lax.fori_loop(0, num_steps, lambda _, c: game_step(c), carry)
+    return rewards, None
 
 
 def fitness_mp(
@@ -254,16 +287,24 @@ def fitness_mp(
     num_players: int,
     steps_per_round: int,
     num_rounds: int,
+    record: bool = False,
+    record_every: int = 1,
+    record_fn: Optional[Callable] = None,
+    parallel_rounds: int = 1,
     **kwargs,
 ):
     """Each round shuffles the population into games of num_players. When the
     population doesn't divide evenly, the last game is filled with genomes that
-    also play elsewhere, so fitness is the mean reward per game played."""
+    also play elsewhere, so fitness is the mean reward per game played. If record,
+    also returns a Recording of the first round's games.
+
+    Rounds run parallel_rounds at a time, side by side, which is faster as long as
+    one round's games leave the accelerator room; the fitness is the same."""
     num_games = -(-genome.batch_size // num_players)
     num_seats = num_games * num_players
 
-    def one_round(carry, rng):
-        totals, counts = carry
+    def one_round(rng, record=False):
+        """The genomes in each seat, their rewards, and the games if record."""
         rng_seats, rng_fill, rng_game = jax.random.split(rng, 3)
         ids = jnp.concatenate(
             [
@@ -277,16 +318,46 @@ def fitness_mp(
             ]
         )
         seated = jax.tree.map(lambda x: x[ids], genome)
-        rewards = race(
-            step_fn, reset_fn, rng_game, seated, num_games, steps_per_round, **kwargs
+        rewards, frames = race(
+            step_fn,
+            reset_fn,
+            rng_game,
+            seated,
+            num_games,
+            steps_per_round,
+            record=record,
+            record_every=record_every,
+            record_fn=record_fn,
+            **kwargs,
         )
-        return (totals.at[ids].add(rewards.ravel()), counts.at[ids].add(1)), None
+        return ids, rewards.ravel(), frames
+
+    def tally(carry, ids, rewards):
+        totals, counts = carry
+        return totals.at[ids].add(rewards), counts.at[ids].add(1)
+
+    def some_rounds(carry, rngs):
+        ids, rewards, _ = jax.vmap(one_round)(rngs)
+        return tally(carry, ids.ravel(), rewards.ravel()), None
 
     zeros = jnp.zeros(genome.batch_size)
-    (totals, counts), _ = jax.lax.scan(
-        one_round, (zeros, zeros), xs=jax.random.split(rng, num_rounds)
-    )
-    return totals / counts, None
+    carry, rngs, recording = (zeros, zeros), jax.random.split(rng, num_rounds), None
+    if record:
+        # one round's games are enough to show: every genome plays in one of them
+        ids, rewards, frames = one_round(rngs[0], record=True)
+        carry = tally(carry, ids, rewards)
+        recording = Recording(frames, ids.reshape(num_games, num_players))
+        rngs = rngs[1:]
+    # the rest in batches of parallel_rounds, then any left over
+    batch = max(1, min(parallel_rounds, len(rngs)))
+    batches = len(rngs) // batch
+    if batches:
+        stacked = rngs[: batches * batch].reshape((batches, batch) + rngs.shape[1:])
+        carry, _ = jax.lax.scan(some_rounds, carry, xs=stacked)
+    if len(rngs) % batch:
+        carry, _ = some_rounds(carry, rngs[batches * batch :])
+    totals, counts = carry
+    return totals / counts, recording
 
 
 def fitness_mp_h2h(
@@ -314,9 +385,44 @@ def fitness_mp_h2h(
         )
 
     seated = jax.tree.map(seat, genome_1, genome_2)
-    rewards = race(step_fn, reset_fn, rng, seated, num_games, num_steps, **kwargs)
+    rewards, _ = race(step_fn, reset_fn, rng, seated, num_games, num_steps, **kwargs)
     rewards = rewards.ravel()
     return jnp.array([rewards[is_first].mean(), rewards[~is_first].mean()]), None
+
+
+def fitness_mp_field(
+    step_fn: Callable,
+    reset_fn: Callable,
+    rng: jax.Array,
+    genome: Genome,
+    num_races: int,
+    num_steps: int,
+    record_every: int = 1,
+    record_fn: Optional[Callable] = None,
+    **kwargs,
+) -> Tuple[jax.Array, Any]:
+    """The batch of genomes all racing each other, num_races times: race r starts
+    them r places round the grid from race 0, so that each starts from every place
+    as often. Returns each genome's mean reward per race, and race 0's task state
+    every record_every steps (or what record_fn keeps of it), genome i in seat i."""
+    num_players = genome.batch_size
+    games, seats = np.arange(num_races)[:, None], np.arange(num_players)[None]
+    ids = (seats + games) % num_players
+    seated = jax.tree.map(lambda x: x[ids.ravel()], genome)
+    rewards, frames = race(
+        step_fn,
+        reset_fn,
+        rng,
+        seated,
+        num_races,
+        num_steps,
+        record=True,
+        record_every=record_every,
+        record_fn=record_fn,
+        **kwargs,
+    )
+    totals = jnp.zeros(num_players).at[ids.ravel()].add(rewards.ravel())
+    return totals / num_races, jax.tree.map(lambda x: x[0], frames)
 
 
 def make_fitness_fn(
@@ -324,6 +430,7 @@ def make_fitness_fn(
     num_steps: int,
     frames_len: Optional[int] = None,
     record: bool = False,
+    frames_every: int = 1,
 ) -> Callable:
     assert num_steps > 0, "num_steps must be greater than 0"
     if frames_len is None:
@@ -336,6 +443,7 @@ def make_fitness_fn(
         num_steps=num_steps,
         frames_len=frames_len,
         record=record,
+        frames_every=frames_every,
     )
 
 
@@ -362,10 +470,17 @@ def make_h2h_fitness_fn(task: TwoPlayerTask, num_steps: int) -> Callable:
 
 
 def make_mp_fitness_fn(
-    task: MultiPlayerTask, steps_per_round: int, num_rounds: int
+    task: MultiPlayerTask,
+    steps_per_round: int,
+    num_rounds: int,
+    record: bool = False,
+    record_every: int = 1,
+    record_fn: Optional[Callable] = None,
+    parallel_rounds: int = 1,
 ) -> Callable:
     assert num_rounds > 0, "num_rounds must be greater than 0"
     assert steps_per_round > 0, "steps_per_round must be greater than 0"
+    assert parallel_rounds > 0, "parallel_rounds must be greater than 0"
     return partial(
         fitness_mp,
         step_fn=task.step_mp,
@@ -373,6 +488,10 @@ def make_mp_fitness_fn(
         num_players=task.num_players,
         steps_per_round=steps_per_round,
         num_rounds=num_rounds,
+        record=record,
+        record_every=record_every,
+        record_fn=record_fn,
+        parallel_rounds=parallel_rounds,
     )
 
 
@@ -385,4 +504,24 @@ def make_mp_h2h_fitness_fn(task: MultiPlayerTask, num_steps: int) -> Callable:
         reset_fn=task.reset,
         num_players=task.num_players,
         num_steps=num_steps,
+    )
+
+
+def make_mp_field_fn(
+    task: MultiPlayerTask,
+    num_races: int,
+    num_steps: int,
+    record_every: int = 1,
+    record_fn: Optional[Callable] = None,
+) -> Callable:
+    assert num_races > 0, "num_races must be greater than 0"
+    assert num_steps > 0, "num_steps must be greater than 0"
+    return partial(
+        fitness_mp_field,
+        step_fn=task.step_mp,
+        reset_fn=task.reset,
+        num_races=num_races,
+        num_steps=num_steps,
+        record_every=record_every,
+        record_fn=record_fn,
     )

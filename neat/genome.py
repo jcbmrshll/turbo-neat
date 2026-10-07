@@ -30,6 +30,10 @@ class ValidConnectionState:
     # see get_valid_connections
 
 
+# the rank of an edge that isn't in the condensed graph (see Graph.ranks)
+UNRANKED = jnp.iinfo(jnp.int32).max
+
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class Graph:
@@ -39,6 +43,10 @@ class Graph:
     weights: jax.Array
     innovation_ids: jax.Array
     enabled_mask: jax.Array
+    # the depth of each edge's source node, the longest path to it from an input,
+    # or UNRANKED for an edge not in the condensed graph; set by topsort_and_condense,
+    # and forward runs every edge of one rank at once
+    ranks: jax.Array
 
     @property
     def capacity(self) -> int:
@@ -54,6 +62,7 @@ def init_empty_graph(capacity: int) -> Graph:
         weights=jnp.zeros(capacity, dtype=jnp.float32),
         innovation_ids=jnp.zeros(capacity, dtype=jnp.int32),
         enabled_mask=jnp.zeros(capacity, dtype=jnp.bool_),
+        ranks=jnp.full(capacity, UNRANKED, dtype=jnp.int32),
     )
 
 
@@ -212,13 +221,22 @@ def forward(
         node_values = node_values.at[..., to_node].add(activated_value)
         return node_values
 
-    # # TODO: try scan+unroll?
+    # every edge out of the nodes at one depth at once: their sources are complete,
+    # as every edge into a node comes from a shallower one
+    def propagate_rank(rank: int, node_values: jax.Array) -> jax.Array:
+        in_rank = (graph.ranks == rank) & graph.enabled_mask
+        sources = node_values[..., graph.from_nodes]
+        activated = jax.vmap(activation_selector, in_axes=(0, -1), out_axes=-1)(
+            genome.node_activation_ids[graph.from_nodes], sources
+        )
+        added = jnp.where(in_rank, activated * graph.weights, 0.0)
+        return node_values.at[..., graph.to_nodes].add(added)
+
     if diff_mode:
         node_values = jax.lax.fori_loop(0, genome.capacity, propagate, node_values)
     else:
-        node_values = jax.lax.fori_loop(
-            0, genome.condensed_size, propagate, node_values
-        )
+        num_ranks = jnp.max(jnp.where(graph.ranks == UNRANKED, -1, graph.ranks)) + 1
+        node_values = jax.lax.fori_loop(0, num_ranks, propagate_rank, node_values)
 
     # apply output activation functions
     output_nodes = slice(genome.input_size, genome.input_size + genome.output_size)
@@ -282,6 +300,13 @@ def update_connection(
     )
 
 
+def _rank_initial(graph: Graph, num_connections: int) -> Graph:
+    """The first num_connections edges, every one from an input, at rank 0: so that
+    a new genome runs without a topsort first, as its condensed_size says."""
+    first = jnp.arange(graph.capacity) < num_connections
+    return replace(graph, ranks=jnp.where(first, 0, UNRANKED).astype(jnp.int32))
+
+
 def fully_connect(
     genome: Genome,
     rng: jax.Array,
@@ -308,6 +333,7 @@ def fully_connect(
     )
     return replace(
         genome,
+        graph=_rank_initial(genome.graph, num_connections),
         condensed_size=num_connections,
         num_initial_connections=num_connections,
     )
@@ -345,6 +371,7 @@ def partially_connect(
     )
     return replace(
         genome,
+        graph=_rank_initial(genome.graph, genome.input_size),
         condensed_size=genome.input_size,
         num_initial_connections=genome.input_size,
     )
@@ -356,6 +383,11 @@ def extend_capacity(genome: Genome, amount: int) -> Genome:
     """
     padded_graph = jax.tree.map(
         lambda x: jnp.pad(x, (0, amount), constant_values=0), genome.graph
+    )
+    # the new edges aren't in the condensed graph
+    padded_graph = replace(
+        padded_graph,
+        ranks=jnp.pad(genome.graph.ranks, (0, amount), constant_values=UNRANKED),
     )
     padded_node_mask = jnp.pad(genome.node_mask, (0, amount), constant_values=False)
     padded_act_ids = jnp.pad(genome.node_activation_ids, (0, amount), constant_values=0)
@@ -374,6 +406,7 @@ def topsort_and_condense(genome: Genome) -> Genome:
     * assumes graph is DAG
     * nodes not on a path from input to output are assigned max rank
     * assigns graph.condensed_size = number of edges in the topological order
+    * assigns graph.ranks = each edge's source depth, UNRANKED past condensed_size
     """
 
     graph = genome.graph
@@ -426,12 +459,11 @@ def topsort_and_condense(genome: Genome) -> Genome:
     bw_state = jax.lax.while_loop(cond_fn, backward_pass, bw_state)
     common = fw_state.reachable & bw_state.reachable
     valid_edges = common[graph.from_nodes] & common[graph.to_nodes] & graph.enabled_mask
-    edge_ranks = jnp.where(
-        valid_edges, fw_state.node_rank[graph.from_nodes], jnp.iinfo(jnp.int32).max
-    )
+    edge_ranks = jnp.where(valid_edges, fw_state.node_rank[graph.from_nodes], UNRANKED)
     sorted_rank_indices = jnp.argsort(edge_ranks, axis=-1)
     sorted_graph = jax.tree.map(lambda x: x[sorted_rank_indices], graph)
-    condensed_size = jnp.sum(edge_ranks != jnp.iinfo(jnp.int32).max, axis=-1)
+    sorted_graph = replace(sorted_graph, ranks=edge_ranks[sorted_rank_indices])
+    condensed_size = jnp.sum(edge_ranks != UNRANKED, axis=-1)
     return replace(
         genome,
         graph=sorted_graph,
