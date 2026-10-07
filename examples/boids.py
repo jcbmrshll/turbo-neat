@@ -13,7 +13,7 @@ from evojax.task.flocking import FlockingTask
 import neat.activations as act
 from monitor import DEFAULT_URL, Episode, Monitor
 from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
-from neat.fitness import make_fitness_fn
+from neat.fitness import make_fitness_fn, make_test_fn
 from neat.neat import NEAT
 from neat.species import make_improvement_stagnation_fn
 
@@ -119,7 +119,9 @@ def main():
         fitness_fn=make_fitness_fn(
             task=train_task, num_steps=NUM_STEPS, record=args.monitor is not None
         ),
-        baseline_test_fn=make_fitness_fn(task=test_task, num_steps=NUM_STEPS),
+        baseline_test_fn=make_test_fn(
+            task=test_task, num_steps=NUM_STEPS, num_episodes=100
+        ),
         monitor=Monitor(args.monitor, project="boids") if args.monitor else None,
     )
     neat.run(seed=args.seed, num_generations=args.generations, episode_fn=episode_fn)
