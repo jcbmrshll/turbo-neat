@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Callable, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from neat.genome import Genome
 
 
 @jax.tree_util.register_dataclass
@@ -190,6 +194,132 @@ def get_species_stats(species_data: SpeciesData, prev_stats) -> Dict:
         if k not in species_dict and "species_dominance" in k and v > 0.0:
             species_dict[k] = 0.0
     return species_dict
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class SpeciesPCA:
+    # all of size (S,): one slot per species, empty slots have size 0
+    species_id: jax.Array
+    size: jax.Array
+    mean_fitness: jax.Array
+    # (S, 2): each species on the first two principal components
+    coords: jax.Array
+    # (2,): the fraction of the variance between species each component explains
+    explained_variance: jax.Array
+
+
+def species_pca(genome: Genome, num_species: int) -> SpeciesPCA:
+    """Where each species sits relative to the others: the mean of its members'
+    parameters, projected onto the first two principal components of those means.
+    num_species bounds how many species the members can be in.
+
+    Parameters line up across genomes by where they came from: a connection's weight
+    by its innovation id (0 for a genome without it, or with it disabled), an input
+    or output node's bias by its index, and a hidden node's bias by the innovation id
+    of the connection split to make it, which is the first connection into it.
+
+    The number of distinct parameters changes every generation, so every parameter
+    of every member gets a column, and the columns of shared parameters are summed:
+    the means are (num_species, 2 * batch_size * capacity), mostly zeros."""
+    n, capacity = genome.batch_size, genome.capacity
+    initialized = genome.initialized_conn_mask
+    enabled = genome.graph.enabled_mask & initialized
+    innovation_ids = genome.graph.innovation_ids
+    member = jnp.broadcast_to(jnp.arange(n)[:, None], (n, capacity))
+    node_ids = jnp.broadcast_to(jnp.arange(capacity), (n, capacity))
+
+    no_id = jnp.iinfo(jnp.int32).max
+    first_in = (
+        jnp.full((n, capacity), no_id)
+        .at[member, genome.graph.to_nodes]
+        .min(jnp.where(initialized, innovation_ids, no_id))
+    )
+    io = node_ids < genome.input_size + genome.output_size
+    hidden = genome.node_mask & ~io & (first_in < no_id)
+
+    # every slot of every member, as (kind, id) -> value; unused slots add 0
+    kinds = jnp.concatenate(
+        [jnp.zeros_like(innovation_ids), jnp.where(io, 1, 2)]
+    ).ravel()
+    ids = jnp.concatenate([innovation_ids, jnp.where(io, node_ids, first_in)]).ravel()
+    values = jnp.concatenate(
+        [
+            jnp.where(enabled, genome.graph.weights, 0.0),
+            jnp.where(io | hidden, genome.node_biases, 0.0),
+        ]
+    ).ravel()
+    owners = jnp.concatenate([member, member]).ravel()
+    order = jnp.lexsort((kinds, ids))
+    kinds, ids, values, owners = kinds[order], ids[order], values[order], owners[order]
+    new_column = (ids != jnp.roll(ids, 1)) | (kinds != jnp.roll(kinds, 1))
+    columns = jnp.cumsum(new_column.at[0].set(True)) - 1
+
+    species_ids, member_species = jnp.unique(
+        genome.species_id, size=num_species, return_inverse=True
+    )
+    member_species = member_species.ravel()
+    sizes = jnp.bincount(member_species, length=num_species)
+    valid = sizes > 0
+    means = (
+        jnp.zeros((num_species, values.shape[0]))
+        .at[member_species[owners], columns]
+        .add(values)
+    ) / jnp.maximum(sizes, 1)[:, None]
+
+    centered = jnp.where(
+        valid[:, None], means - jnp.mean(means, axis=0, where=valid[:, None]), 0
+    )
+    # the principal components of a few species, from their (S, S) gram matrix; at
+    # full precision, since gpus multiply float32 at reduced precision by default
+    matmul = partial(jnp.matmul, precision=jax.lax.Precision.HIGHEST)
+    gram = matmul(centered, centered.T)
+    eigenvalues, eigenvectors = jnp.linalg.eigh(gram)
+    eigenvalues = jnp.maximum(eigenvalues[::-1][:2], 0)
+    eigenvectors = eigenvectors[:, ::-1][:, :2]
+    singular_values = jnp.sqrt(eigenvalues)
+    loadings = matmul(centered.T, eigenvectors) / jnp.maximum(singular_values, 1e-12)
+    # a component's sign is arbitrary: point each along its largest loading, so the
+    # map doesn't flip from one generation to the next for no reason
+    largest = loadings[jnp.abs(loadings).argmax(axis=0), jnp.arange(2)]
+    signs = jnp.where(largest < 0, -1.0, 1.0)
+    total = jnp.trace(gram)
+
+    fitness_sums = jnp.zeros(num_species).at[member_species].add(genome.fitness)
+    return SpeciesPCA(
+        species_id=species_ids,
+        size=sizes,
+        mean_fitness=fitness_sums / jnp.maximum(sizes, 1),
+        coords=jnp.where(valid[:, None], eigenvectors * singular_values * signs, 0),
+        explained_variance=jnp.where(total > 0, eigenvalues / total, 0),
+    )
+
+
+def describe_species_pca(pca: SpeciesPCA) -> Dict:
+    """The species map as plain data, for the monitor to draw."""
+    size = np.asarray(pca.size)
+    coords = np.asarray(pca.coords, dtype=np.float64)
+    fitness = np.asarray(pca.mean_fitness, dtype=np.float64)
+    species_ids = np.asarray(pca.species_id)
+
+    def num(v):
+        # 6 significant digits, and JSON has no NaN or inf
+        return float(f"{v:.6g}") if np.isfinite(v) else None
+
+    return {
+        "type": "species_pca",
+        "explained_variance": [num(v) for v in np.asarray(pca.explained_variance)],
+        "species": [
+            {
+                "id": int(species_ids[i]),
+                "x": num(coords[i, 0]),
+                "y": num(coords[i, 1]),
+                "size": int(size[i]),
+                "fitness": num(fitness[i]),
+            }
+            for i in np.flatnonzero(size)
+        ],
+    }
 
 
 def fill_prev_stats(prev_stats, cur_stats) -> Dict:

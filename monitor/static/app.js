@@ -632,7 +632,7 @@ function relayoutOverview() {
 
 // ---------------------------------------------------------------- media
 
-const MEDIA_TITLES = { episode: "episode", network: "network" };
+const MEDIA_TITLES = { episode: "episode", network: "network", species_pca: "species map" };
 const MEDIA_ORDER = ["episode", "network"];
 // the side the policy plays in the champion's game against an environment's
 // built-in baseline: evojax's single-player slimevolley gives it the right
@@ -717,6 +717,10 @@ function updateMediaCard(key, entries, card) {
         if (card.shown !== entry.file) return;
         if (data.type === "network") {
           const { svg, summary } = networkView(data, card.body.clientWidth - 22);
+          card.body.replaceChildren(svg);
+          card.foot.replaceChildren(h("div", { class: "net-foot", text: summary }));
+        } else if (data.type === "species_pca") {
+          const { svg, summary } = speciesMapView(data, card.body.clientWidth - 22);
           card.body.replaceChildren(svg);
           card.foot.replaceChildren(h("div", { class: "net-foot", text: summary }));
         } else {
@@ -862,6 +866,95 @@ function networkView(net, width) {
   return { svg, summary };
 }
 
+// ---------------------------------------------------------------- species map
+
+// how many of the biggest species get a name beside their dot; the rest on hover
+const SPECIES_MAP_LABELS = 8;
+
+// each species' mean parameters on the first two principal components across
+// species: a dot per species, sized by its members, both axes to one scale so
+// distances on the map are distances between species
+function speciesMapView(data, width) {
+  const W = Math.max(width, 200), H = 300;
+  const pad = { l: 34, r: 14, t: 14, b: 22 };
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+  const svg = h("svg", { class: "chart species-map", viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+  const species = data.species.filter((s) => s.x != null && s.y != null);
+  const [ev1, ev2] = data.explained_variance.map((v) => `${Math.round((v ?? 0) * 100)}%`);
+  const summary = `${species.length} species · PC1 ${ev1} · PC2 ${ev2} of variance`;
+  if (!species.length) return { svg, summary };
+
+  const maxSize = Math.max(...species.map((s) => s.size));
+  const radius = (s) => 4 + 8 * Math.sqrt(s.size / maxSize);
+  // the same units per pixel on both axes, with room for the biggest dot
+  const xs = species.map((s) => s.x), ys = species.map((s) => s.y);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const span = Math.max((Math.max(...xs) - Math.min(...xs)) / (pw - 28), (Math.max(...ys) - Math.min(...ys)) / (ph - 28)) || 1 / Math.min(pw, ph);
+  const x0 = cx - (pw / 2) * span, x1 = cx + (pw / 2) * span;
+  const y0 = cy - (ph / 2) * span, y1 = cy + (ph / 2) * span;
+  const sx = (x) => pad.l + ((x - x0) / (x1 - x0)) * pw;
+  const sy = (y) => pad.t + (1 - (y - y0) / (y1 - y0)) * ph;
+
+  const step = (lo, hi, count) => {
+    const t = niceTicks(lo, hi, count);
+    return t.filter((v) => v >= lo && v <= hi);
+  };
+  for (const t of step(y0, y1, Math.max(2, Math.floor(ph / 60)))) {
+    svg.append(
+      h("line", { class: t === 0 ? "axis" : "grid", x1: pad.l, x2: W - pad.r, y1: sy(t), y2: sy(t) }),
+      h("text", { class: "tick", x: pad.l - 6, y: sy(t) + 3, "text-anchor": "end", text: fmtTick(t) }),
+    );
+  }
+  for (const t of step(x0, x1, Math.max(2, Math.floor(pw / 80)))) {
+    svg.append(
+      h("line", { class: t === 0 ? "axis" : "grid", x1: sx(t), x2: sx(t), y1: pad.t, y2: H - pad.b }),
+      h("text", { class: "tick", x: sx(t), y: H - 7, "text-anchor": "middle", text: fmtTick(t) }),
+    );
+  }
+  svg.append(
+    h("text", { class: "tick axis-name", x: W - pad.r, y: H - pad.b - 5, "text-anchor": "end", text: `PC1 ${ev1}` }),
+    h("text", { class: "tick axis-name", x: pad.l + 5, y: pad.t + 9, text: `PC2 ${ev2}` }),
+  );
+
+  const name = (s) => state.speciesNames[s.id] ?? `s${s.id}`;
+  const labelled = new Set([...species].sort((a, b) => b.size - a.size).slice(0, SPECIES_MAP_LABELS).map((s) => s.id));
+  // the biggest underneath, so no dot hides a smaller one
+  for (const s of [...species].sort((a, b) => b.size - a.size)) {
+    const r = radius(s);
+    const dot = h(
+      "g",
+      { class: "sp-dot" },
+      h("circle", { class: "hit", cx: sx(s.x), cy: sy(s.y), r: r + 6 }),
+      h("circle", { class: "dot", cx: sx(s.x), cy: sy(s.y), r, fill: speciesColor(s.id) }),
+    );
+    dot.addEventListener("pointermove", (e) =>
+      showTip(
+        e.clientX,
+        e.clientY,
+        h("div", { class: "head" }, swatch(s.id), ` ${name(s)}`),
+        h("div", { class: "row" }, h("b", { text: s.size }), h("span", { text: s.size === 1 ? "member" : "members" })),
+        h("div", { class: "row" }, h("b", { text: fmt(s.fitness) }), h("span", { text: "mean fitness" })),
+        h("div", { class: "row" }, h("span", { text: `(${fmt(s.x)}, ${fmt(s.y)})` })),
+      ),
+    );
+    dot.addEventListener("pointerleave", hideTip);
+    svg.append(dot);
+  }
+  for (const s of species.filter((s) => labelled.has(s.id))) {
+    const right = sx(s.x) < W - 80;
+    svg.append(
+      h("text", {
+        class: "sp-lab",
+        x: sx(s.x) + (right ? 1 : -1) * (radius(s) + 4),
+        y: sy(s.y) + 3,
+        "text-anchor": right ? "start" : "end",
+        text: name(s),
+      }),
+    );
+  }
+  return { svg, summary };
+}
+
 // ---------------------------------------------------------------- leaderboard
 
 function speciesColor(id) {
@@ -905,8 +998,9 @@ async function pollBoard() {
     state.board = board;
     state.speciesNames = board.species_names;
     renderBoard();
+    // the species charts and the species map are labelled with these names
     if (renamed && state.rows.length) {
-      if (state.activeTab == null) renderCharts();
+      if (state.activeTab == null) relayoutOverview();
       else state.overviewStale = true;
     }
   } catch {

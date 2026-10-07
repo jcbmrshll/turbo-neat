@@ -25,7 +25,7 @@ from neat.population import (
     _init_population,
     create_next_generation,
 )
-from neat.species import fill_prev_stats, get_species_stats
+from neat.species import SpeciesPCA, fill_prev_stats, get_species_stats, species_pca
 from neat.utils import apply, is_printable
 from neat.visualize import genome_to_network
 
@@ -210,6 +210,7 @@ class NEAT:
         Callable[[jax.Array, Population], Tuple[Population, jax.Array, jax.Array]]
     ]
     test_baseline: Optional[Callable[[jax.Array, Population], Tuple[jax.Array, Any]]]
+    map_species: Callable[[Genome], SpeciesPCA]
 
     def __init__(
         self,
@@ -240,6 +241,9 @@ class NEAT:
         else:
             self.test_champion = None
         self.evolve = jax.jit(partial(evolve_one_generation, config=config))
+        self.map_species = jax.jit(
+            partial(species_pca, num_species=config.selection_config.maximum_species)
+        )
         if baseline_test_fn is not None:
             self.test_baseline = jax.jit(
                 partial(
@@ -412,6 +416,8 @@ class NEAT:
                     episode_fn,
                     recording,
                     evaluated.genome_id,
+                    # on the device: only the map itself is copied off it
+                    self.map_species(members),
                 )
                 with jax.default_device(jax.devices("cpu")[0]):
                     if log_async:
