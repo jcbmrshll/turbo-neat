@@ -176,6 +176,12 @@ code {
   margin: 22px 0 6px;
 }
 
+/* a section title with controls on the right */
+.stitle-row { display: flex; align-items: center; gap: 8px; margin: 22px 0 6px; }
+.stitle-row[hidden] { display: none; }
+.stitle-row .stitle { margin: 0; }
+.stitle-row .spacer { flex: 1; }
+
 /* stat tiles */
 
 .tiles { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -236,6 +242,17 @@ code {
 .scrub button:hover:not(:disabled) { border-color: var(--edge-hot); color: var(--fg); }
 .scrub button:disabled { color: var(--faint); cursor: default; }
 .scrub button.on { border-color: var(--accent); color: var(--accent); }
+.scrub input {
+  font: 11px var(--mono);
+  color: var(--mid);
+  background: transparent;
+  border: 1px solid var(--edge);
+  padding: 0 4px;
+  height: 20px;
+  width: 52px;
+}
+.scrub input:focus { outline: none; border-color: var(--edge-hot); color: var(--fg); }
+.scrub input.on { border-color: var(--accent); color: var(--accent); }
 .scrub .pos { min-width: 70px; text-align: center; font-variant-numeric: tabular-nums; }
 
 /* charts */
