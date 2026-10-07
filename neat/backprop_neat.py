@@ -12,6 +12,7 @@ from neat.fitness import Recording
 from neat.genome import Genome, prepare_for_inference
 from neat.neat import NEAT, FitnessFn, evolve_one_generation, test_against_baseline
 from neat.population import Population
+from neat.species import species_pca
 
 # called like a FitnessFn on a fresh batch of data; returns fitness (-loss) and
 # (weight grads, bias grads) of the loss for each genome, then, if it was made to
@@ -129,6 +130,9 @@ class BackpropNEAT(NEAT):
             )
         )
         self.evolve = jax.jit(partial(evolve_one_generation, config=config))
+        self.map_species = jax.jit(
+            partial(species_pca, num_species=config.selection_config.maximum_species)
+        )
         if test_fn is not None:
             self.test_baseline = jax.jit(
                 partial(

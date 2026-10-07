@@ -267,6 +267,15 @@ code {
 .chart .cross { stroke: var(--edge-hot); stroke-width: 1; shape-rendering: crispEdges; }
 .chart .hover-dot { stroke: var(--panel); stroke-width: 2; }
 
+/* species map */
+
+.species-map { height: auto; }
+.species-map .axis-name { fill: var(--faint); }
+.species-map .dot { stroke: var(--panel); stroke-width: 2; }
+.species-map .hit { fill: transparent; }
+.species-map .sp-dot:hover .dot { stroke: var(--fg); stroke-width: 1.5; }
+.species-map .sp-lab { font: 10px var(--mono); fill: var(--mid); pointer-events: none; }
+
 /* network */
 
 .net .edge { fill: none; }
