@@ -36,10 +36,10 @@ import neat.activations as act
 from monitor import DEFAULT_URL, Episode, Monitor
 from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
 from neat.fitness import (
-    make_fitness_fn,
     make_mp_field_fn,
     make_mp_fitness_fn,
     make_mp_h2h_fitness_fn,
+    make_test_fn,
 )
 from neat.neat import NEAT
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
@@ -602,7 +602,8 @@ def main():
         "--field-races",
         type=int,
         default=16,
-        help="races the fittest run against each other, each time",
+        help="races the fittest run against each other (or the best against the "
+        "bots, with --test bots), each time",
     )
     parser.add_argument(
         "--field-every",
@@ -648,8 +649,11 @@ def main():
             f"bots cover {bot_distance(race, bots, test_steps):.1f}m"
             f" in a {test_steps * race.dt:g}s race"
         )
-        tests["baseline_test_fn"] = make_fitness_fn(
-            bots, num_steps=test_steps, frames_every=race.record_every
+        tests["baseline_test_fn"] = make_test_fn(
+            bots,
+            num_steps=test_steps,
+            num_episodes=args.field_races,
+            frames_every=race.record_every,
         )
     else:
         tests["field_test_fn"] = make_mp_field_fn(

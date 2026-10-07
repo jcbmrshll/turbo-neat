@@ -25,7 +25,7 @@ from evojax.task.slimevolley import Game, GameState, SlimeVolley
 import neat.activations as act
 from monitor import DEFAULT_URL, Episode, Monitor
 from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
-from neat.fitness import make_2p_fitness_fn, make_fitness_fn, make_h2h_fitness_fn
+from neat.fitness import make_2p_fitness_fn, make_h2h_fitness_fn, make_test_fn
 from neat.neat import NEAT
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
 
@@ -224,7 +224,9 @@ def main():
             record=args.monitor is not None,
         ),
         h2h_test_fn=make_h2h_fitness_fn(selfplay, num_steps=1000),
-        baseline_test_fn=make_fitness_fn(baseline, num_steps=1000, frames_len=300),
+        baseline_test_fn=make_test_fn(
+            baseline, num_steps=1000, num_episodes=1000, frames_len=300
+        ),
         monitor=Monitor(args.monitor, project="slimevolley") if args.monitor else None,
     )
     neat.run(seed=args.seed, num_generations=args.generations, episode_fn=episode_fn)

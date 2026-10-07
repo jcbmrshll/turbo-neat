@@ -766,6 +766,73 @@ def render_f1tenth(data: Dict[str, np.ndarray]) -> Video:
     return Video(frames, fps=F1TENTH_FPS, keep_colors=keep)
 
 
+# ---------------------------------------------------------------- cartpole
+
+# evojax's cart-pole, in world units: the cart's track is x in [-2.4, 2.4], and the
+# pole is 0.6 long and upright at theta = 0
+CART_X_LIMIT, POLE_LEN = 2.4, 0.6
+CART_W, CART_H, WHEEL_R = 0.4, 0.2, 0.05
+# a 6.4 x 2 window onto the track, drawn at 100 px per unit like evojax
+CART_SCALE, CARTPOLE_W, CARTPOLE_H = 100, 640, 200
+# examples/cartpole.py keeps every 4th of evojax's 0.01 s steps, so this is real time
+CARTPOLE_FPS = 25
+
+
+def _cartpole_frame(x: float, theta: float) -> Image.Image:
+    width, height = CARTPOLE_W * SUPERSAMPLE, CARTPOLE_H * SUPERSAMPLE
+    scale = CART_SCALE * SUPERSAMPLE
+    # the pole swings a full circle about its pivot, 0.35 above the track; center it
+    track_y = height - 0.65 * scale
+
+    def px(wx, wy):
+        return width / 2 + wx * scale, track_y - wy * scale
+
+    def disc(wx, wy, r, fill):
+        cx, cy = px(wx, wy)
+        draw.ellipse(
+            (cx - r * scale, cy - r * scale, cx + r * scale, cy + r * scale), fill=fill
+        )
+
+    image = Image.new("RGB", (width, height), WELL)
+    draw = ImageDraw.Draw(image)
+    # the track, with stops where the cart goes out of bounds
+    draw.line(
+        (*px(-CART_X_LIMIT, 0), *px(CART_X_LIMIT, 0)), fill=EDGE, width=2 * SUPERSAMPLE
+    )
+    for side in (-1, 1):
+        sx, sy = px(side * CART_X_LIMIT, 0)
+        draw.line(
+            (sx, sy - 0.1 * scale, sx, sy + 0.1 * scale),
+            fill=MID,
+            width=2 * SUPERSAMPLE,
+        )
+
+    # the cart rides on its wheels, with the pole's pivot on top
+    body_y = WHEEL_R + CART_H / 2
+    for side in (-1, 1):
+        disc(x + side * CART_W / 3, WHEEL_R, WHEEL_R, MID)
+    x0, y0 = px(x - CART_W / 2, body_y + CART_H / 2)
+    x1, y1 = px(x + CART_W / 2, body_y - CART_H / 2)
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=0.03 * scale, fill=BLUE)
+
+    pivot_y = body_y + CART_H / 2
+    tip_x, tip_y = x + POLE_LEN * np.sin(theta), pivot_y + POLE_LEN * np.cos(theta)
+    draw.line(
+        (*px(x, pivot_y), *px(tip_x, tip_y)), fill=ORANGE, width=round(0.06 * scale)
+    )
+    # round off the pole's end, and pin it to the cart
+    disc(tip_x, tip_y, 0.03, ORANGE)
+    disc(x, pivot_y, 0.035, INK)
+    return _downsample(image)
+
+
+@renderer("cartpole")
+def render_cartpole(data: Dict[str, np.ndarray]) -> Video:
+    """data["state"]: (steps, 4) of x, x_dot, theta, theta_dot."""
+    frames = [_cartpole_frame(s[0], s[2]) for s in data["state"]]
+    return Video(frames, fps=CARTPOLE_FPS)
+
+
 # ---------------------------------------------------------------- 2d classification
 
 

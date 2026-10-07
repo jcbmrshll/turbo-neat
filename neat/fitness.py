@@ -31,7 +31,7 @@ def _episode_major(frames: Any) -> Any:
     return jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), frames)
 
 
-def _rollout(
+def _scan_every(
     step: Callable, carry: Any, num_steps: int, every: int, frame: Callable
 ) -> Tuple[Any, Any]:
     """step carry num_steps times, keeping frame(carry) after every `every` steps;
@@ -51,6 +51,62 @@ def _rollout(
 class FitnessState:
     task_state: jax.Array
     reward: jax.Array
+    # how many times each episode's task has reset (reported done) while scoring
+    resets: jax.Array
+
+
+def _keep_where(mask: jax.Array, new: Any, old: Any) -> Any:
+    """new where mask, else old, for every leaf of a batched pytree."""
+    return jax.tree.map(
+        lambda n, o: jnp.where(mask.reshape(mask.shape + (1,) * (n.ndim - 1)), n, o),
+        new,
+        old,
+    )
+
+
+def rollout(
+    step_fn: Callable,
+    reset_fn: Callable,
+    rng: jax.Array,
+    policy: Callable[[jax.Array], jax.Array],
+    num_envs: int,
+    num_steps: int,
+    max_resets: Optional[int],
+    keep: Optional[Callable[[Any], Any]] = None,
+) -> Tuple[jax.Array, Any]:
+    """Play num_envs episodes side by side for num_steps steps, with policy mapping
+    their batched observations to actions. Returns each episode's total reward,
+    and keep(task state) at every step (None without keep).
+
+    Each done the task reports is a reset: the task starts over from a new state.
+    Reward counts until the task has reset more than max_resets times, after which
+    the task state is held where it was, rather than playing on from a new start.
+    So 0 scores one episode, like evojax's rollouts; k lets an episode use k extra
+    starts, like lives; None scores straight through every reset, for tasks whose
+    done just starts a new round."""
+    # None never runs out of resets
+    limit = jnp.iinfo(jnp.int32).max if max_resets is None else max_resets
+    state = FitnessState(
+        task_state=reset_fn(jax.random.split(rng, num_envs)),
+        reward=jnp.zeros(num_envs, dtype=jnp.float32),
+        resets=jnp.zeros(num_envs, dtype=jnp.int32),
+    )
+
+    def game_step(state, _):
+        task_state, rewards, done = step_fn(
+            state.task_state, policy(state.task_state.obs)
+        )
+        # the step that resets the task still counts
+        counted = state.resets <= limit
+        reward = state.reward + jnp.where(counted, rewards, 0)
+        resets = state.resets + (counted & done.astype(bool))
+        # past the last counted reset, keep the task's last state
+        task_state = _keep_where(resets <= limit, task_state, state.task_state)
+        state = FitnessState(task_state=task_state, reward=reward, resets=resets)
+        return state, None if keep is None else keep(task_state)
+
+    state, frames = jax.lax.scan(game_step, state, length=num_steps)
+    return state.reward, frames
 
 
 def fitness(
@@ -59,36 +115,70 @@ def fitness(
     rng: jax.Array,
     genome: Genome,
     num_steps: int,
+    num_episodes: int,
+    max_resets: Optional[int],
+    record: bool,
+    **kwargs,
+) -> Tuple[jax.Array, Optional[Recording]]:
+    """Scores a population: each genome's total reward, averaged over num_episodes
+    episodes from different starts (see rollout for max_resets), and, if record, a
+    Recording of every genome's first episode."""
+
+    def policy(obs):
+        return apply(genome, forward, obs, **kwargs)
+
+    play = partial(
+        rollout,
+        step_fn,
+        reset_fn,
+        policy=policy,
+        num_envs=genome.batch_size,
+        num_steps=num_steps,
+        max_resets=max_resets,
+    )
+    reward, frames = play(rng, keep=(lambda s: s) if record else None)
+    if num_episodes > 1:
+        # the rest of the episodes only count towards fitness
+        rngs = jax.random.split(jax.random.fold_in(rng, 1), num_episodes - 1)
+        rewards, _ = jax.vmap(play)(rngs)
+        reward = (reward + rewards.sum(axis=0)) / num_episodes
+    if not record:
+        return reward, None
+    players = jnp.arange(genome.batch_size)[:, None]
+    return reward, Recording(_episode_major(frames), players)
+
+
+def test(
+    step_fn: Callable,
+    reset_fn: Callable,
+    rng: jax.Array,
+    genome: Genome,
+    num_steps: int,
+    num_episodes: int,
+    max_resets: Optional[int],
     frames_len: int,
-    record: bool = False,
     frames_every: int = 1,
     **kwargs,
 ) -> Tuple[jax.Array, Any]:
-    """Returns the total reward of each genome, and either a Recording of every
-    genome's episode (if record) or the first genome's first frames_len steps;
-    either way, keeping the task state every frames_every steps."""
-    task_state = reset_fn(jax.random.split(rng, genome.batch_size))
-    state = FitnessState(
-        task_state=task_state,
-        reward=jnp.zeros(genome.batch_size, dtype=jnp.float32),
+    """Scores one genome: its mean total reward over num_episodes episodes from
+    different starts (see rollout for max_resets), and the task state over the first
+    frames_len steps of the first episode, every frames_every steps, to show it."""
+
+    def policy(obs):
+        return forward(genome, obs, **kwargs)
+
+    rewards, frames = rollout(
+        step_fn,
+        reset_fn,
+        rng,
+        policy,
+        num_envs=num_episodes,
+        num_steps=num_steps,
+        max_resets=max_resets,
+        keep=lambda s: jax.tree.map(lambda x: x[0], s),
     )
-
-    def game_step(state):
-        actions = apply(genome, forward, state.task_state.obs, **kwargs)
-        task_state, rewards, _ = step_fn(state.task_state, actions)
-        return FitnessState(task_state=task_state, reward=state.reward + rewards)
-
-    # all of every genome's episode, or only the first's
-    def frame(state):
-        if record:
-            return state.task_state
-        return jax.tree.map(lambda x: x[0], state.task_state)
-
-    state, frames = _rollout(game_step, state, num_steps, frames_every, frame)
-    if record:
-        players = jnp.arange(genome.batch_size)[:, None]
-        return state.reward, Recording(_episode_major(frames), players)
-    return state.reward, jax.tree.map(lambda x: x[: frames_len // frames_every], frames)
+    shown = slice(frames_every - 1, frames_len, frames_every)
+    return rewards.mean(), jax.tree.map(lambda x: x[shown], frames)
 
 
 class TwoPlayerTask(Protocol):
@@ -271,7 +361,7 @@ def race(
     carry = (task_state, jnp.zeros(task_state.obs.shape[:2]))
     if record:
         keep = record_fn or (lambda task_state: task_state)
-        (_, rewards), frames = _rollout(
+        (_, rewards), frames = _scan_every(
             game_step, carry, num_steps, record_every, lambda carry: keep(carry[0])
         )
         return rewards, _episode_major(frames)
@@ -428,21 +518,48 @@ def fitness_mp_field(
 def make_fitness_fn(
     task: VectorizedTask,
     num_steps: int,
-    frames_len: Optional[int] = None,
+    num_episodes: int = 1,
+    max_resets: Optional[int] = 0,
     record: bool = False,
-    frames_every: int = 1,
 ) -> Callable:
+    """A training fitness: scores every genome of a population on task (see
+    fitness)."""
     assert num_steps > 0, "num_steps must be greater than 0"
-    if frames_len is None:
-        frames_len = num_steps
-    frames_len = min(frames_len, num_steps)
+    assert num_episodes > 0, "num_episodes must be greater than 0"
+    assert max_resets is None or max_resets >= 0, "max_resets must be at least 0"
     return partial(
         fitness,
         step_fn=task.step,
         reset_fn=task.reset,
         num_steps=num_steps,
-        frames_len=frames_len,
+        num_episodes=num_episodes,
+        max_resets=max_resets,
         record=record,
+    )
+
+
+def make_test_fn(
+    task: VectorizedTask,
+    num_steps: int,
+    num_episodes: int,
+    max_resets: Optional[int] = 0,
+    frames_len: Optional[int] = None,
+    frames_every: int = 1,
+) -> Callable:
+    """A test of one genome, e.g. the best of a generation, on task (see test)."""
+    assert num_steps > 0, "num_steps must be greater than 0"
+    assert num_episodes > 0, "num_episodes must be greater than 0"
+    assert max_resets is None or max_resets >= 0, "max_resets must be at least 0"
+    if frames_len is None:
+        frames_len = num_steps
+    return partial(
+        test,
+        step_fn=task.step,
+        reset_fn=task.reset,
+        num_steps=num_steps,
+        num_episodes=num_episodes,
+        max_resets=max_resets,
+        frames_len=min(frames_len, num_steps),
         frames_every=frames_every,
     )
 

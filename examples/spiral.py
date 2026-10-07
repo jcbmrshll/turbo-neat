@@ -25,7 +25,6 @@ from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfi
 from neat.fitness import Recording
 from neat.genome import Genome, forward
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
-from neat.utils import apply
 
 NUM_POINTS = 1000
 
@@ -111,16 +110,14 @@ def make_backprop_fn(generate: Callable, record: bool = False) -> Callable:
 
 
 def make_test_fn(generate: Callable) -> Callable:
-    """Scores the genomes on fresh data, and returns the points with their predicted
-    class probabilities, shape (batch, points, 3), for plotting."""
+    """Scores one genome on fresh data, and returns the points with their predicted
+    class probabilities, shape (points, 3), for plotting."""
 
     def test_fn(rng, genome: Genome, **kwargs):
-        rng_batch = jax.random.split(rng, genome.batch_size)
-        num_points = max(NUM_POINTS // genome.batch_size, 1)
-        data, labels = jax.vmap(partial(generate, num_points=num_points))(rng_batch)
-        logits = apply(genome, forward, data, **kwargs, diff_mode=False)
+        data, labels = generate(rng, num_points=NUM_POINTS)
+        logits = forward(genome, data, **kwargs, diff_mode=False)
         loss = sigmoid_binary_cross_entropy(logits.squeeze(-1), labels).mean()
-        return -loss, jnp.concatenate([data, jax.nn.sigmoid(logits)], axis=2)
+        return -loss, jnp.concatenate([data, jax.nn.sigmoid(logits)], axis=-1)
 
     return test_fn
 
@@ -187,11 +184,11 @@ def make_config() -> NEATConfig:
 
 
 def episode_fn(data):
-    """Points with a genome's predicted probabilities, for the monitor to plot. data
-    is (..., genomes, points, 3) and each plot merges its genomes (the test's copies
-    of the best genome); a leading axis, as in the members' recorded batches, makes
-    one plot each."""
-    data = data.reshape(data.shape[:-3] + (-1, 3))
+    """Points with a genome's predicted probabilities, for the monitor to plot: the
+    test's (points, 3), or the members' recorded batch, (members, 1, points, 3),
+    which makes one plot each."""
+    if data.ndim == 4:
+        data = data[:, 0]
     return Episode("classification_2d", points=data[..., :2], probability=data[..., 2])
 
 

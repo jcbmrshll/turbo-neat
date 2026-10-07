@@ -34,6 +34,9 @@ from neat.visualize import genome_to_network
 # returns fitness and any auxiliary data (e.g. the episode, for the monitor); a
 # fitness function made with record=True returns a Recording of every episode
 FitnessFn = Callable[..., Tuple[jax.Array, Any]]
+# called with keyword arguments (rng, genome, activation_selector) for a single
+# genome; returns its score and any data to show for it (e.g. the episode)
+TestFn = Callable[..., Tuple[jax.Array, Any]]
 
 
 def init_population(
@@ -147,20 +150,13 @@ def evolve_one_generation(
 def test_against_baseline(
     rng: jax.Array,
     population: Population,
-    test_fn: FitnessFn,
+    test_fn: TestFn,
     activation_selector: ActivationSelector,
 ) -> Tuple[jax.Array, Any]:
-    """Evaluate the fitness of the most fit member of the population on a test set"""
+    """Test the most fit member of the population"""
     genomes: Genome = population.batched_genome
-    most_fit_genome_idx = jnp.argmax(genomes.fitness)
-    # copy most fit genome to all idxs
-    dup_genome = jax.tree.map(
-        lambda x: jnp.broadcast_to(x[most_fit_genome_idx], x.shape), genomes
-    )
-    fitnesses, data = test_fn(
-        rng=rng, genome=dup_genome, activation_selector=activation_selector
-    )
-    return fitnesses.mean(), data
+    most_fit = jax.tree.map(lambda x: x[jnp.argmax(genomes.fitness)], genomes)
+    return test_fn(rng=rng, genome=most_fit, activation_selector=activation_selector)
 
 
 def test_against_champion(
@@ -238,7 +234,7 @@ class NEAT:
         config: NEATConfig,
         fitness_fn: FitnessFn,
         h2h_test_fn: Optional[FitnessFn] = None,
-        baseline_test_fn: Optional[FitnessFn] = None,
+        baseline_test_fn: Optional[TestFn] = None,
         monitor: Optional[Monitor] = None,
         field_test_fn: Optional[FitnessFn] = None,
         field_size: int = 0,
