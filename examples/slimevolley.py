@@ -25,7 +25,7 @@ from evojax.task.slimevolley import Game, GameState, SlimeVolley
 import neat.activations as act
 from monitor import DEFAULT_URL, Episode, Monitor
 from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
-from neat.fitness import make_2p_fitness_fn, make_h2h_fitness_fn, make_test_fn
+from neat.fitness import make_mp_fitness_fn, make_mp_h2h_fitness_fn, make_test_fn
 from neat.neat import NEAT
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
 
@@ -44,17 +44,23 @@ slimevolley.get_random_ball_v = get_random_ball_v
 @dataclass(frozen=True)
 class State2p:
     game_state: GameState
-    obs_left: jax.Array
-    obs_right: jax.Array
-    reward_left: jax.Array
-    reward_right: jax.Array
+    # each slime's observation, left then right
+    obs: jax.Array
     steps: jax.Array
     key: jax.Array
 
 
-class SlimeVolley2p:
-    """SlimeVolley with both slimes controlled by the caller, for self-play."""
+def observe(game: Game) -> jax.Array:
+    return jnp.stack(
+        [game.agent_left.getObservation(), game.agent_right.getObservation()]
+    )
 
+
+class SlimeVolley2p:
+    """SlimeVolley with both slimes controlled by the caller, for self-play: a
+    multi-player task of two players, the left slime then the right."""
+
+    num_players = 2
     obs_shape = (12,)
     act_shape = (3,)
 
@@ -64,19 +70,16 @@ class SlimeVolley2p:
         def reset_fn(key: jax.Array) -> State2p:
             next_key, key = jax.random.split(key)
             game_state = slimevolley.get_init_game_state_fn(key)
-            game = Game(game_state)
             return State2p(
                 game_state=game_state,
-                obs_left=game.agent_left.getObservation(),
-                obs_right=game.agent_right.getObservation(),
-                reward_left=jnp.zeros((), dtype=jnp.int32),
-                reward_right=jnp.zeros((), dtype=jnp.int32),
+                obs=observe(Game(game_state)),
                 steps=jnp.zeros((), dtype=jnp.int32),
                 key=next_key,
             )
 
-        def step_fn(state: State2p, action_left: jax.Array, action_right: jax.Array):
+        def step_fn(state: State2p, actions: jax.Array):
             next_key, key = jax.random.split(state.key)
+            action_left, action_right = actions
             game = Game(state.game_state)
             game.setLeftAction(action_left)
             game.setRightAction(action_right)
@@ -84,7 +87,6 @@ class SlimeVolley2p:
             game.agent_right.setAction(action_right)
             # the game scores from the perspective of the slime on the right
             reward_right = game.step()
-            reward_left = -reward_right
             game_state = slimevolley.update_state_for_new_match(
                 game.getGameState(), reward_right, key
             )
@@ -92,14 +94,11 @@ class SlimeVolley2p:
             done = steps >= max_steps
             state = State2p(
                 game_state=game_state,
-                obs_left=game.agent_left.getObservation(),
-                obs_right=game.agent_right.getObservation(),
-                reward_left=reward_left,
-                reward_right=reward_right,
+                obs=observe(game),
                 steps=jnp.where(done, 0, steps),
                 key=next_key,
             )
-            return state, reward_left, reward_right, done
+            return state, jnp.stack([-reward_right, reward_right]), done
 
         self._reset_fn = jax.jit(jax.vmap(reset_fn))
         self._step_fn = jax.jit(jax.vmap(step_fn))
@@ -107,10 +106,10 @@ class SlimeVolley2p:
     def reset(self, key: jax.Array) -> State2p:
         return self._reset_fn(key)
 
-    def step_2p(
-        self, state: State2p, action_left: jax.Array, action_right: jax.Array
-    ) -> Tuple[State2p, jax.Array, jax.Array, jax.Array]:
-        return self._step_fn(state, action_left, action_right)
+    def step_mp(
+        self, state: State2p, actions: jax.Array
+    ) -> Tuple[State2p, jax.Array, jax.Array]:
+        return self._step_fn(state, actions)
 
 
 def make_config(input_size: int, output_size: int) -> NEATConfig:
@@ -215,15 +214,17 @@ def main():
 
     neat = NEAT(
         config=make_config(selfplay.obs_shape[0], selfplay.act_shape[0]),
-        # a single round is too noisy a fitness signal to learn from; the first
-        # round's games are recorded for the monitor's lineage view
-        fitness_fn=make_2p_fitness_fn(
+        # each round is one game per genome, and a few games are too noisy a fitness
+        # signal to learn from; the first round's games are recorded for the
+        # monitor's lineage view
+        fitness_fn=make_mp_fitness_fn(
             selfplay,
             steps_per_round=500,
-            num_rounds=4,
+            num_rounds=8,
             record=args.monitor is not None,
+            parallel_rounds=2,
         ),
-        h2h_test_fn=make_h2h_fitness_fn(selfplay, num_steps=1000),
+        h2h_test_fn=make_mp_h2h_fitness_fn(selfplay, num_steps=1000),
         baseline_test_fn=make_test_fn(
             baseline, num_steps=1000, num_episodes=1000, frames_len=300
         ),

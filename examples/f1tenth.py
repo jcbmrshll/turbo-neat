@@ -403,7 +403,6 @@ class RaceAgainstBots:
 
         self._reset_fn = jax.jit(jax.vmap(reset_fn))
         self._step_fn = jax.jit(jax.vmap(step_fn))
-        self.drive = drive
 
     def reset(self, key: jax.Array) -> BotRaceState:
         return self._reset_fn(key)
@@ -412,27 +411,6 @@ class RaceAgainstBots:
         self, state: BotRaceState, action: jax.Array
     ) -> Tuple[BotRaceState, jax.Array, jax.Array]:
         return self._step_fn(state, action)
-
-
-def bot_distance(race: F1TenthRace, bots: RaceAgainstBots, num_steps: int) -> float:
-    """Mean distance a car covers in num_steps when every car is a bot."""
-
-    @jax.jit
-    def run(key):
-        state = race.reset(jax.random.split(key, 64))
-
-        def step(_, carry):
-            state, total = carry
-            actions = jax.vmap(bots.drive)(state.env_state.cartesian_states)
-            state, rewards, _ = race.step_mp(state, actions)
-            return state, total + rewards
-
-        _, total = jax.lax.fori_loop(
-            0, num_steps, step, (state, jnp.zeros((64, race.num_players)))
-        )
-        return total.mean()
-
-    return float(run(jax.random.PRNGKey(0)))
 
 
 def make_config(
@@ -641,16 +619,14 @@ def main():
         grid_spacing=args.grid_spacing,
     )
     race_steps = round(args.race_seconds / race.dt)
+    # a race is done when every car is out, but it doesn't start over: the wrecks
+    # just stand there, so score straight through and keep the last crash in replays
+    max_resets = None
     test_steps = round((args.test_seconds or args.race_seconds) / race.dt)
     tests = {}
     if args.test == "bots":
-        bots = RaceAgainstBots(race)
-        print(
-            f"bots cover {bot_distance(race, bots, test_steps):.1f}m"
-            f" in a {test_steps * race.dt:g}s race"
-        )
         tests["baseline_test_fn"] = make_test_fn(
-            bots,
+            RaceAgainstBots(race),
             num_steps=test_steps,
             num_episodes=args.field_races,
             frames_every=race.record_every,
@@ -660,6 +636,7 @@ def main():
             race,
             args.field_races,
             test_steps,
+            max_resets=max_resets,
             record_every=race.record_every,
             record_fn=race.record_frame,
         )
@@ -673,6 +650,7 @@ def main():
             race,
             steps_per_round=race_steps,
             num_rounds=args.rounds,
+            max_resets=max_resets,
             record=args.monitor is not None,
             record_every=race.record_every,
             record_fn=race.record_frame,
@@ -680,7 +658,7 @@ def main():
         ),
         # a lone car races the clock, so its best fitness so far is a fair test
         h2h_test_fn=(
-            make_mp_h2h_fitness_fn(race, num_steps=race_steps)
+            make_mp_h2h_fitness_fn(race, num_steps=race_steps, max_resets=max_resets)
             if args.cars > 1
             else None
         ),
