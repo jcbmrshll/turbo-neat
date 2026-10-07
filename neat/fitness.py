@@ -4,10 +4,11 @@ from typing import Any, Callable, Optional, Protocol, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from evojax.task.base import VectorizedTask
 
 from neat.genome import Genome, forward
-from neat.utils import apply
+from neat.utils import apply, mask_data
 
 
 @jax.tree_util.register_dataclass
@@ -198,6 +199,126 @@ def fitness_h2h(
     return jnp.array([state.reward_left.mean(), state.reward_right.mean()]), None
 
 
+class MultiPlayerTask(Protocol):
+    """A task where num_players genomes play each game, e.g. a race.
+
+    The state's obs is (games, num_players, obs_size), and step_mp takes actions of
+    (games, num_players, act_size) and returns rewards of (games, num_players)."""
+
+    num_players: int
+
+    def reset(self, key: jax.Array, /) -> Any: ...
+
+    def step_mp(
+        self, state: Any, actions: jax.Array, /
+    ) -> Tuple[Any, jax.Array, jax.Array]: ...
+
+
+def apply_seats(genome: Genome, obs: jax.Array, **kwargs) -> jax.Array:
+    """Actions of a batch of genomes laid out as (games, seats), for obs of
+    (games, seats, obs_size)."""
+    games, seats = obs.shape[:2]
+    actions = apply(genome, forward, obs.reshape(games * seats, -1), **kwargs)
+    return actions.reshape(games, seats, -1)
+
+
+def race(
+    step_fn: Callable,
+    reset_fn: Callable,
+    rng: jax.Array,
+    seated: Genome,
+    num_games: int,
+    num_steps: int,
+    **kwargs,
+) -> jax.Array:
+    """Total reward of each seat over num_games games of num_steps, where seated is
+    a batch of genomes laid out as (games, seats) and flattened."""
+    task_state = reset_fn(jax.random.split(rng, num_games))
+
+    def game_step(_, carry):
+        task_state, rewards = carry
+        actions = apply_seats(seated, task_state.obs, **kwargs)
+        task_state, step_rewards, _ = step_fn(task_state, actions)
+        return task_state, rewards + step_rewards
+
+    rewards = jnp.zeros(task_state.obs.shape[:2])
+    _, rewards = jax.lax.fori_loop(0, num_steps, game_step, (task_state, rewards))
+    return rewards
+
+
+def fitness_mp(
+    step_fn: Callable,
+    reset_fn: Callable,
+    rng: jax.Array,
+    genome: Genome,
+    num_players: int,
+    steps_per_round: int,
+    num_rounds: int,
+    **kwargs,
+):
+    """Each round shuffles the population into games of num_players. When the
+    population doesn't divide evenly, the last game is filled with genomes that
+    also play elsewhere, so fitness is the mean reward per game played."""
+    num_games = -(-genome.batch_size // num_players)
+    num_seats = num_games * num_players
+
+    def one_round(carry, rng):
+        totals, counts = carry
+        rng_seats, rng_fill, rng_game = jax.random.split(rng, 3)
+        ids = jnp.concatenate(
+            [
+                jax.random.permutation(rng_seats, genome.batch_size),
+                jax.random.choice(
+                    rng_fill,
+                    genome.batch_size,
+                    (num_seats - genome.batch_size,),
+                    replace=False,
+                ),
+            ]
+        )
+        seated = jax.tree.map(lambda x: x[ids], genome)
+        rewards = race(
+            step_fn, reset_fn, rng_game, seated, num_games, steps_per_round, **kwargs
+        )
+        return (totals.at[ids].add(rewards.ravel()), counts.at[ids].add(1)), None
+
+    zeros = jnp.zeros(genome.batch_size)
+    (totals, counts), _ = jax.lax.scan(
+        one_round, (zeros, zeros), xs=jax.random.split(rng, num_rounds)
+    )
+    return totals / counts, None
+
+
+def fitness_mp_h2h(
+    step_fn: Callable,
+    reset_fn: Callable,
+    rng: jax.Array,
+    genome_1: Genome,
+    genome_2: Genome,
+    num_players: int,
+    num_steps: int,
+    **kwargs,
+):
+    """genome_1 against genome_2 with the seats alternating between them, shifted
+    by one each game so that both start from every seat. genome_1 and genome_2 are
+    each one genome broadcast over the batch; the games seat as many players as the
+    batch holds. Returns each genome's mean reward per seat."""
+    num_games = -(-genome_1.batch_size // num_players)
+    games, seats = np.arange(num_games)[:, None], np.arange(num_players)[None]
+    is_first = ((games + seats) % 2 == 0).ravel()
+
+    def seat(x, y):
+        shape = (num_games * num_players,) + x.shape[1:]
+        return mask_data(
+            jnp.broadcast_to(x[0], shape), jnp.broadcast_to(y[0], shape), is_first
+        )
+
+    seated = jax.tree.map(seat, genome_1, genome_2)
+    rewards = race(step_fn, reset_fn, rng, seated, num_games, num_steps, **kwargs)
+    rewards = rewards.ravel()
+    return jnp.array([rewards[is_first].mean(), rewards[~is_first].mean()]), None
+
+
 def make_fitness_fn(
     task: VectorizedTask,
     num_steps: int,
@@ -237,4 +358,31 @@ def make_h2h_fitness_fn(task: TwoPlayerTask, num_steps: int) -> Callable:
     assert num_steps > 0, "num_steps must be greater than 0"
     return partial(
         fitness_h2h, step_fn=task.step_2p, reset_fn=task.reset, num_steps=num_steps
+    )
+
+
+def make_mp_fitness_fn(
+    task: MultiPlayerTask, steps_per_round: int, num_rounds: int
+) -> Callable:
+    assert num_rounds > 0, "num_rounds must be greater than 0"
+    assert steps_per_round > 0, "steps_per_round must be greater than 0"
+    return partial(
+        fitness_mp,
+        step_fn=task.step_mp,
+        reset_fn=task.reset,
+        num_players=task.num_players,
+        steps_per_round=steps_per_round,
+        num_rounds=num_rounds,
+    )
+
+
+def make_mp_h2h_fitness_fn(task: MultiPlayerTask, num_steps: int) -> Callable:
+    assert task.num_players > 1, "a head-to-head needs at least two players"
+    assert num_steps > 0, "num_steps must be greater than 0"
+    return partial(
+        fitness_mp_h2h,
+        step_fn=task.step_mp,
+        reset_fn=task.reset,
+        num_players=task.num_players,
+        num_steps=num_steps,
     )

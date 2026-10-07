@@ -14,7 +14,8 @@ turbo-neat-monitor = "monitor.server:main"
 
 [project.optional-dependencies]
 # GPU build of jax; ./install.sh adds this when it finds an NVIDIA GPU
-cuda = ["jax[cuda13]"]
+# (the plugin is listed again because the jax override in [tool.uv] drops the extra)
+cuda = ["jax[cuda13]", "jax-cuda13-plugin[with-cuda]>=0.10.2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -31,4 +32,15 @@ venv = ".venv"
 dev = [
     # evojax's slimevolley task imports cv2 without declaring it (examples/slimevolley.py)
     "opencv-python-headless>=5.0.0.93",
+    # examples/f1tenth.py
+    "f1tenth-gym-jax",
 ]
+
+[tool.uv]
+# f1tenth-gym-jax pins jax<0.8 (and flax/chex to match), and its jax-pf dependency
+# pins jax[cuda12]<0.7. Neither uses anything newer jax removed.
+override-dependencies = ["jax>=0.10.2", "flax>=0.10.6", "chex>=0.1.89"]
+
+[tool.uv.sources]
+f1tenth-gym-jax = { git = "https://github.com/f1tenth/f1tenth_gym_jax", rev = "1b4eb3f5161756bb925987753b965b549097742f" }
+jax-pf = { git = "https://github.com/hzheng40/jax_pf", rev = "1b1417d7d2afbf24a9c6594195c2e872a6b4460a" }

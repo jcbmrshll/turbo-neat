@@ -168,6 +168,78 @@ def render_slimevolley(data: Dict[str, np.ndarray]) -> Video:
     )
 
 
+# ---------------------------------------------------------------- f1tenth
+
+F1TENTH_W = 640
+# cars are tiny next to the track, so they are drawn this many times life size
+CAR_SCALE = 3.0
+# an arrowhead, nose along +x, in units of the car's length and width
+CAR_OUTLINE = np.array([(0.5, 0.0), (-0.5, 0.5), (-0.3, 0.0), (-0.5, -0.5)])
+# every other control step, at twice real time
+F1TENTH_FRAME_STRIDE, F1TENTH_FPS = 2, 20
+
+
+def _f1tenth_frame(walls, to_px, scale, car_size, poses, crashed, champion):
+    image = walls.copy()
+    draw = ImageDraw.Draw(image)
+    length, width = car_size * CAR_SCALE * scale
+    ox, oy = CAR_OUTLINE[:, 0] * length, CAR_OUTLINE[:, 1] * width
+    # the champion goes on last, over the bots
+    order = [i for i in range(len(poses)) if i != champion] + [champion]
+    for i in order:
+        x, y, yaw = poses[i]
+        cx, cy = to_px(x, y)
+        cos, sin = np.cos(yaw), np.sin(yaw)
+        # y is up in the world and down on the screen
+        polygon = list(zip((cx + cos * ox - sin * oy).tolist(), (cy - sin * ox - cos * oy).tolist()))
+        color = BLUE if i == champion else ORANGE
+        draw.polygon(polygon, fill=EDGE if crashed[i] else color, outline=color)
+    return _downsample(image)
+
+
+@renderer("f1tenth")
+def render_f1tenth(data: Dict[str, np.ndarray]) -> Video:
+    """data["walls"]: (rows, cols) bitmap of the track's walls, row 0 at the bottom,
+    with its bottom-left corner at data["origin"] and pixels data["pixel_size"]
+    metres across; data["poses"]: (steps, cars, 3) of x, y, yaw;
+    data["crashed"]: (steps, cars); data["champion"]: the policy's car, the rest
+    being bots; data["car_size"]: length and width."""
+    walls = data["walls"]
+    rows, cols = walls.shape
+    width = F1TENTH_W * SUPERSAMPLE
+    height = round(width * rows / cols)
+    scale = width / (cols * float(data["pixel_size"]))
+    x0, y0 = data["origin"]
+
+    def to_px(x, y):
+        return (x - x0) * scale, height - (y - y0) * scale
+
+    # the walls, flipped so that y is up, in the dashboard's palette
+    mask = Image.fromarray(np.flipud(walls).astype(np.uint8) * 255).resize(
+        (width, height), resample=Image.Resampling.BILINEAR
+    )
+    background = Image.new("RGB", (width, height), WELL)
+    background.paste(Image.new("RGB", (width, height), MID), mask=mask)
+
+    champion = int(data["champion"])
+    frames = range(0, len(data["poses"]), F1TENTH_FRAME_STRIDE)
+    return Video(
+        [
+            _f1tenth_frame(
+                background,
+                to_px,
+                scale,
+                data["car_size"],
+                data["poses"][t],
+                data["crashed"][t],
+                champion,
+            )
+            for t in frames
+        ],
+        fps=F1TENTH_FPS,
+    )
+
+
 # ---------------------------------------------------------------- 2d classification
 
 
