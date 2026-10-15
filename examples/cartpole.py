@@ -2,14 +2,17 @@
 
 The pole starts hanging below the cart; the policy pushes the cart left or right to
 swing it up and balance it there; running off the end of the track ends the
-episode. Each step scores up to 1 for a pole that's upright over a centered cart, so a perfect
-1000-step episode scores just under 1000. Each genome's fitness is averaged over a
-few episodes from different starts; on one, a lucky start can outscore a better
-policy.
+episode. Each step scores up to 1 for a pole that's upright over a centered cart,
+so a perfect 1000-step episode scores just under 1000. Each genome's fitness is
+averaged over 16 episodes, and every genome plays from the same 16 starts, new ones
+each generation: on starts of its own, a genome could outscore a better one just
+by drawing easier ones.
 
 Every 10th generation, the 10 fittest are each tested over 1000 episodes. Expect
-the best of their average scores to pass 800 within the first 100 generations, which take a few minutes on a GPU. This config isn't tuned
-for --harder yet: there it stalls at about 400.
+the best of their average scores to pass 900 within the first 100 generations,
+which take about 3 minutes on a GPU. With --harder, expect about 600 by then.
+That's close to the ceiling: about a third of those starts send the cart off the
+track even if it brakes at full force.
 
     uv run examples/cartpole.py --generations 100
     uv run examples/cartpole.py --harder        # random starts, anywhere on the track
@@ -31,7 +34,7 @@ from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
 from neat.testing import make_top_k_test
 
 NUM_STEPS = 1000
-NUM_EPISODES = 4
+NUM_EPISODES = 16
 # keep every few steps of an episode: the monitor plays them back at 25 fps, so this
 # is real time
 FRAME_STRIDE = round(1 / (25 * DELTA_T))
@@ -39,15 +42,17 @@ FRAME_STRIDE = round(1 / (25 * DELTA_T))
 
 def make_config(input_size: int, output_size: int) -> NEATConfig:
     mutation_config = MutationConfig(
-        add_connection_prob=0.05,
-        add_node_prob=0.03,
+        add_connection_prob=0.2,
+        add_node_prob=0.1,
         disable_connection_prob=0.01,
         disable_node_prob=0.006,
         mutate_weight_std=0.5,
         mutate_weight_prob=0.8,
         mutate_activation_prob=0.0,
-        mutate_bias_prob=0.0,
-        mutate_bias_std=0.0,
+        # hidden nodes only: a bias lets a node switch on past a threshold, e.g. once
+        # the pole is near the top
+        mutate_bias_prob=0.1,
+        mutate_bias_std=0.5,
     )
 
     genome_config = GenomeConfig(
@@ -56,7 +61,7 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         initial_capacity=100,
         init_weight_mean=0.0,
         init_weight_std=1.0,
-        activation_fns=[act.iden, act.sigmoid, act.tanh, act.relu],
+        activation_fns=[act.iden, act.sigmoid, act.tanh, act.relu, act.sin, act.absl],
         # identity on every input
         input_activation_ids=[0 for _ in range(input_size)],
         # tanh on the output: the task clips the force to [-1, 1]
@@ -128,6 +133,9 @@ def main():
             num_steps=NUM_STEPS,
             num_episodes=NUM_EPISODES,
             record=args.monitor is not None,
+            # starts vary so much (with --harder, some can't be saved) that genomes
+            # are only comparable on the same ones
+            replicate_rng=True,
         ),
         # every 10th generation's 10 fittest, over 1000 episodes each
         test_fn=make_top_k_test(

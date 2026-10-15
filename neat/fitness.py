@@ -74,6 +74,7 @@ def rollout(
     max_resets: Optional[int],
     keep: Optional[Callable[[Any], Any]] = None,
     keep_every: int = 1,
+    replicate_rng: bool = False,
 ) -> Tuple[jax.Array, Any]:
     """Play num_envs episodes side by side for num_steps steps, with policy mapping
     their batched observations to actions. Returns each episode's total reward, and
@@ -88,10 +89,17 @@ def rollout(
     the task state is held where it was, rather than playing on from a new start.
     So 0 scores one episode, like evojax's rollouts; k lets an episode use k extra
     starts, like lives; None scores straight through every reset, for tasks whose
-    done just starts a new round."""
+    done just starts a new round.
+
+    With replicate_rng, every episode resets with the same rng, so starts from the
+    same state."""
     # None never runs out of resets
     limit = jnp.iinfo(jnp.int32).max if max_resets is None else max_resets
-    task_state = reset_fn(jax.random.split(rng, num_envs))
+    if replicate_rng:
+        keys = jnp.broadcast_to(rng, (num_envs,) + rng.shape)
+    else:
+        keys = jax.random.split(rng, num_envs)
+    task_state = reset_fn(keys)
     rewards = jax.eval_shape(lambda s: step_fn(s, policy(s.obs))[1], task_state)
     state = FitnessState(
         task_state=task_state,
@@ -129,11 +137,16 @@ def fitness(
     num_episodes: int,
     max_resets: Optional[int],
     record: bool,
+    replicate_rng: bool = False,
     **kwargs,
 ) -> Tuple[jax.Array, Optional[Recording]]:
     """Scores a population: each genome's total reward, averaged over num_episodes
     episodes from different starts (see rollout for max_resets), and, if record, a
-    Recording of every genome's first episode."""
+    Recording of every genome's first episode.
+
+    With replicate_rng, every genome gets the same rng for each episode, so plays
+    from the same num_episodes starts: one can't outscore another just by drawing
+    easier ones."""
 
     def policy(obs):
         return apply(genome, forward, obs, **kwargs)
@@ -146,6 +159,7 @@ def fitness(
         num_envs=genome.batch_size,
         num_steps=num_steps,
         max_resets=max_resets,
+        replicate_rng=replicate_rng,
     )
     reward, frames = play(rng, keep=(lambda s: s) if record else None)
     if num_episodes > 1:
@@ -379,6 +393,7 @@ def make_fitness_fn(
     num_episodes: int = 1,
     max_resets: Optional[int] = 0,
     record: bool = False,
+    replicate_rng: bool = False,
 ) -> Callable:
     """A training fitness: scores every genome of a population on task (see
     fitness)."""
@@ -393,6 +408,7 @@ def make_fitness_fn(
         num_episodes=num_episodes,
         max_resets=max_resets,
         record=record,
+        replicate_rng=replicate_rng,
     )
 
 
