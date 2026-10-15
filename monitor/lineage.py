@@ -3,8 +3,11 @@
 A run logs every member of every generation (monitor.client.Members), one line each
 in <run dir>/members.jsonl:
 
-    {"step": 12, "champion": 1031, "ids": [...], "parents": [[a, b], ...],
-     "species": [...], "fitness": [...]}
+    {"step": 12, "ids": [...], "parents": [[a, b], ...], "species": [...],
+     "fitness": [...]}
+
+(Runs from before champions were dropped also have a "champion" id, which is
+ignored.)
 
 Lineage reads that file as it grows and keeps, for every genome id ever seen, when
 it was born and last seen, its parents, species and fitness, in arrays indexed by
@@ -39,7 +42,6 @@ def _num(x: Any) -> Optional[float]:
 @dataclass
 class Generation:
     step: int
-    champion: int
     ids: np.ndarray
     species: np.ndarray
     fitness: np.ndarray
@@ -67,7 +69,6 @@ class Lineage:
         self.fitness = np.full(0, np.nan, dtype=np.float64)
         self.best = np.full(0, np.nan, dtype=np.float64)
         self.children = np.zeros(0, dtype=np.int32)
-        self.champion_gens = np.zeros(0, dtype=np.int32)
 
     # ------------------------------------------------------------ indexing
 
@@ -104,7 +105,6 @@ class Lineage:
         self.fitness = pad(self.fitness, np.nan)
         self.best = pad(self.best, np.nan)
         self.children = pad(self.children, 0)
-        self.champion_gens = pad(self.champion_gens, 0)
 
     def _add(self, row: Dict[str, Any]) -> None:
         step = int(row["step"])
@@ -114,10 +114,9 @@ class Lineage:
         fitness = np.array(
             [np.nan if f is None else f for f in row["fitness"]], dtype=np.float64
         )
-        champion = -1 if row.get("champion") is None else int(row["champion"])
         if not len(ids):
             return
-        self._grow(int(max(ids.max(), parents.max(), champion)) + 1)
+        self._grow(int(max(ids.max(), parents.max())) + 1)
 
         is_new = self.born[ids] < 0
         newborn = ids[is_new]
@@ -133,8 +132,6 @@ class Lineage:
         self.species[ids] = species
         self.fitness[ids] = fitness
         self.best[ids] = np.fmax(self.best[ids], fitness)
-        if champion >= 0:
-            self.champion_gens[champion] += 1
         self.max_species = max(self.max_species, int(species.max()))
 
         # 1 + how many did better
@@ -142,9 +139,7 @@ class Lineage:
         rank = np.searchsorted(np.sort(worse), worse, side="left") + 1
 
         self.gen_index[step] = len(self.generations)
-        self.generations.append(
-            Generation(step, champion, ids, species, fitness, rank, newborn)
-        )
+        self.generations.append(Generation(step, ids, species, fitness, rank, newborn))
 
     # ------------------------------------------------------------ queries
 
@@ -164,12 +159,10 @@ class Lineage:
             "born": int(self.born[gid]),
             "last": int(self.last[gid]),
             "alive": latest is not None and int(self.last[gid]) == latest.step,
-            "champion": latest is not None and latest.champion == gid,
             "age": int(self.last[gid] - self.born[gid] + 1),
             "fitness": _num(self.fitness[gid]),
             "best": _num(self.best[gid]),
             "children": int(self.children[gid]),
-            "champion_gens": int(self.champion_gens[gid]),
             "parents": [int(p) for p in self.parents[gid]],
         }
 
@@ -190,19 +183,6 @@ class Lineage:
 
     def known(self, gid: int) -> bool:
         return 0 <= gid < len(self.born) and self.born[gid] >= 0
-
-    def champions(self) -> List[Dict[str, Any]]:
-        """Each generation's champion, as it stood after that generation's test."""
-        return [
-            {
-                "step": gen.step,
-                "id": gen.champion,
-                "name": alias(gen.champion, int(self.birth_species[gen.champion])),
-                "birth_species": int(self.birth_species[gen.champion]),
-            }
-            for gen in self.generations
-            if self.known(gen.champion)
-        ]
 
     def species_names(self) -> Dict[int, str]:
         return {s: species_alias(s) for s in range(self.max_species + 1)}
@@ -241,7 +221,6 @@ class Lineage:
             rows.append(row)
         return {
             "step": latest.step,
-            "champion": latest.champion,
             "population": int(len(latest.ids)),
             "total": int((self.born >= 0).sum()),
             "rows": rows,

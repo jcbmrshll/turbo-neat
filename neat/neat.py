@@ -26,17 +26,14 @@ from neat.population import (
     create_next_generation,
 )
 from neat.species import SpeciesPCA, fill_prev_stats, get_species_stats, species_pca
+from neat.testing import PopulationTestFn, TestResult
 from neat.utils import apply, is_printable
 from neat.visualize import genome_to_network
 
-# called with keyword arguments (rng, genome, activation_selector), or for head-to-head
-# functions (rng, genome_1, genome_2, activation_selector)
+# called with keyword arguments (rng, genome, activation_selector)
 # returns fitness and any auxiliary data (e.g. the episode, for the monitor); a
 # fitness function made with record=True returns a Recording of every episode
 FitnessFn = Callable[..., Tuple[jax.Array, Any]]
-# called with keyword arguments (rng, genome, activation_selector) for a single
-# genome; returns its score and any data to show for it (e.g. the episode)
-TestFn = Callable[..., Tuple[jax.Array, Any]]
 
 
 def init_population(
@@ -95,12 +92,10 @@ def resize_genome(population: Population, genome_config: GenomeConfig) -> Popula
     extended_prev_genome = apply(
         population.prev_batched_genome, extend_capacity, amount=amount
     )
-    extended_champion = extend_capacity(population.champion, amount=amount)
     return replace(
         population,
         batched_genome=extended_genome,
         prev_batched_genome=extended_prev_genome,
-        champion=extended_champion,
     )
 
 
@@ -147,69 +142,18 @@ def evolve_one_generation(
     return replace(population, generation=population.generation + 1)
 
 
-def test_against_baseline(
+def test_population(
     rng: jax.Array,
     population: Population,
-    test_fn: TestFn,
+    test_fn: PopulationTestFn,
     activation_selector: ActivationSelector,
-) -> Tuple[jax.Array, Any]:
-    """Test the most fit member of the population"""
-    genomes: Genome = population.batched_genome
-    most_fit = jax.tree.map(lambda x: x[jnp.argmax(genomes.fitness)], genomes)
-    return test_fn(rng=rng, genome=most_fit, activation_selector=activation_selector)
-
-
-def test_against_champion(
-    rng: jax.Array,
-    population: Population,
-    h2h_fn: FitnessFn,
-    activation_selector: ActivationSelector,
-) -> Tuple[Population, jax.Array, jax.Array]:
-    genome: Genome = population.batched_genome
-    champion = population.champion
-    challenger_idx = jnp.argmax(genome.fitness)
-    challenger = jax.tree.map(lambda x: x[challenger_idx], genome)
-    b_champion = jax.tree.map(
-        lambda x, y: jnp.broadcast_to(x, y.shape), champion, genome
-    )
-    b_challenger = jax.tree.map(
-        lambda x, y: jnp.broadcast_to(x, y.shape), challenger, genome
-    )
-    fitnesses, _ = h2h_fn(
+) -> TestResult:
+    """Test the evaluated population (see neat.testing)"""
+    return test_fn(
         rng=rng,
-        genome_1=b_champion,
-        genome_2=b_challenger,
+        genome=population.batched_genome,
         activation_selector=activation_selector,
     )
-    champion_fitness = fitnesses[0]
-    challenger_fitness = fitnesses[1]
-    new_champion = challenger_fitness > champion_fitness
-    # a scalar mask broadcasts as is (mask_data would give scalar fields a batch axis)
-    population = replace(
-        population,
-        champion=jax.tree.map(
-            lambda x, y: jnp.where(new_champion, x, y), challenger, champion
-        ),
-    )
-    return population, challenger_fitness, new_champion
-
-
-def test_field(
-    rng: jax.Array,
-    population: Population,
-    test_fn: FitnessFn,
-    field_size: int,
-    activation_selector: ActivationSelector,
-) -> Tuple[jax.Array, Any]:
-    """Test the field_size fittest genomes against each other: their scores, the
-    test's episode, and their genome ids, fittest first"""
-    genomes: Genome = population.batched_genome
-    fittest = jnp.argsort(-genomes.fitness)[:field_size]
-    field = jax.tree.map(lambda x: x[fittest], genomes)
-    scores, data = test_fn(
-        rng=rng, genome=field, activation_selector=activation_selector
-    )
-    return scores, data, field.genome_id
 
 
 class NEAT:
@@ -220,29 +164,20 @@ class NEAT:
         [jax.Array, Population], Tuple[Population, Optional[Recording]]
     ]
     evolve: Callable[[jax.Array, Population], Population]
-    test_champion: Optional[
-        Callable[[jax.Array, Population], Tuple[Population, jax.Array, jax.Array]]
-    ]
-    test_baseline: Optional[Callable[[jax.Array, Population], Tuple[jax.Array, Any]]]
+    test: Optional[Callable[[jax.Array, Population], TestResult]]
     map_species: Callable[[Genome], SpeciesPCA]
-    test_field: Optional[
-        Callable[[jax.Array, Population], Tuple[jax.Array, Any, jax.Array]]
-    ]
 
     def __init__(
         self,
         config: NEATConfig,
         fitness_fn: FitnessFn,
-        h2h_test_fn: Optional[FitnessFn] = None,
-        baseline_test_fn: Optional[TestFn] = None,
+        test_fn: Optional[PopulationTestFn] = None,
+        test_every: int = 10,
         monitor: Optional[Monitor] = None,
-        field_test_fn: Optional[FitnessFn] = None,
-        field_size: int = 0,
-        field_every: int = 1,
     ):
-        """field_test_fn, if given, tests the field_size fittest genomes of every
-        field_every-th generation (from the first) against each other, returning
-        each one's score and an episode, which goes to the monitor."""
+        """test_fn, if given, tests the population of every test_every-th generation
+        (from the first), e.g. its fittest against a baseline: its metrics are
+        logged, and its episode and network go to the monitor (see neat.testing)."""
         self.config = config
         self.activation_selector = config.genome_config.activation_selector
         self.monitor = monitor
@@ -253,44 +188,25 @@ class NEAT:
                 activation_selector=self.activation_selector,
             )
         )
-        if h2h_test_fn is not None:
-            self.test_champion = jax.jit(
-                partial(
-                    test_against_champion,
-                    h2h_fn=h2h_test_fn,
-                    activation_selector=self.activation_selector,
-                )
-            )
-        else:
-            self.test_champion = None
         self.evolve = jax.jit(partial(evolve_one_generation, config=config))
         self.map_species = jax.jit(
             partial(species_pca, num_species=config.selection_config.maximum_species)
         )
-        if baseline_test_fn is not None:
-            self.test_baseline = jax.jit(
+        self._init_test(test_fn, test_every)
+
+    def _init_test(self, test_fn: Optional[PopulationTestFn], test_every: int) -> None:
+        assert test_every > 0, "test_every must be greater than 0"
+        self.test_every = test_every
+        if test_fn is not None:
+            self.test = jax.jit(
                 partial(
-                    test_against_baseline,
-                    test_fn=baseline_test_fn,
+                    test_population,
+                    test_fn=test_fn,
                     activation_selector=self.activation_selector,
                 )
             )
         else:
-            self.test_baseline = None
-        self.field_every = field_every
-        if field_test_fn is not None:
-            assert field_size > 0, "a field test needs a field_size"
-            assert field_every > 0, "field_every must be greater than 0"
-            self.test_field = jax.jit(
-                partial(
-                    test_field,
-                    test_fn=field_test_fn,
-                    field_size=field_size,
-                    activation_selector=self.activation_selector,
-                )
-            )
-        else:
-            self.test_field = None
+            self.test = None
 
     def run(
         self,
@@ -333,7 +249,6 @@ class NEAT:
         species_stats = get_species_stats(
             population.species_data, prev_stats=prev_stats
         )
-        best_fitness = float("-inf")
 
         # this just functions as a logging job queue
         logger = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -371,61 +286,14 @@ class NEAT:
             species_stats, prev_stats = new_species_stats, species_stats
             prev_stats = fill_prev_stats(prev_stats=prev_stats, cur_stats=species_stats)
 
-            if self.test_champion:
-                # test against champion
-                test_rng, rng = jax.random.split(rng)
-                population, challenger_fitness, improved = self.test_champion(
-                    test_rng, population
-                )
-
-                results.update(
-                    {
-                        "challenger_fitness": challenger_fitness,
-                        "improved": int(improved),
-                    }
-                )
-            else:
-                max_fitness = population.batched_genome.fitness.max().item()
-                max_idx = jnp.argmax(population.batched_genome.fitness)
-                improved = max_fitness > best_fitness
-                best_fitness = max(max_fitness, best_fitness)
-                if improved:
-                    population = replace(
-                        population,
-                        champion=jax.tree.map(
-                            lambda x: x[max_idx], population.batched_genome
-                        ),
-                    )
-
-            # test against baseline, keeping the episode for the monitor
-            episode_data, episode_players = None, None
-            if improved:
-                if self.monitor is not None:
-                    results["network"] = genome_to_network(
-                        population.champion,
-                        self.config.genome_config.activation_map,
-                        input_labels=self.config.genome_config.input_labels,
-                        output_labels=self.config.genome_config.output_labels,
-                    )
-
-                if self.test_baseline:
-                    test_rng, rng = jax.random.split(rng)
-                    test_fitness, episode_data = self.test_baseline(
-                        test_rng, population
-                    )
-                    results["fitness_against_baseline"] = test_fitness
-
-            # the fittest playing each other, every field_every generations
-            if self.test_field and g % self.field_every == 0:
-                test_rng, rng = jax.random.split(rng)
-                field_scores, field_episode, field_ids = self.test_field(
-                    test_rng, population
-                )
-                results["field_mean"] = field_scores.mean()
-                results["field_best"] = field_scores.max()
-                # the baseline's episode, if there is one, takes the monitor's slot
-                if episode_data is None:
-                    episode_data, episode_players = field_episode, field_ids
+            # test the population every test_every generations, keeping its
+            # episode, and the genome it picked, for the monitor
+            test, shown = None, None
+            if self.test is not None and g % self.test_every == 0:
+                test = self.test(test_rng, population)
+                results.update(test.metrics)
+                if (idx := test.shown) is not None:
+                    shown = jax.tree.map(lambda x: x[idx], population.batched_genome)
 
             # evolving re-sorts each graph by innovation, so keep the evaluated
             # population (graphs condensed, in topological order) for its networks
@@ -442,8 +310,16 @@ class NEAT:
                     parents=members.parent_ids,
                     species=members.species_id,
                     fitness=members.fitness,
-                    champion=population.champion.genome_id,
                 )
+                # after the members, so the monitor knows the genome to name it
+                if shown is not None:
+                    results["network"] = genome_to_network(
+                        shown,
+                        self.config.genome_config.activation_map,
+                        input_labels=self.config.genome_config.input_labels,
+                        output_labels=self.config.genome_config.output_labels,
+                    )
+                    results["network"]["players"] = [int(shown.genome_id)]
                 results["networks"] = Networks(
                     ids=evaluated.genome_id,
                     from_nodes=evaluated.graph.from_nodes,
@@ -461,13 +337,13 @@ class NEAT:
                     dict(prev_stats),
                     dict(results),
                     g,
-                    episode_data,
+                    None if test is None else test.episode,
                     episode_fn,
                     recording,
                     evaluated.genome_id,
                     # on the device: only the map itself is copied off it
                     self.map_species(members),
-                    episode_players,
+                    None if test is None else test.players,
                 )
                 with jax.default_device(jax.devices("cpu")[0]):
                     if log_async:

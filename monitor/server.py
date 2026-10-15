@@ -82,7 +82,7 @@ class RunStore:
         self.lock = threading.Lock()
         # run id -> its lineage, indexed on first use and kept up to date after
         self.lineages: Dict[str, Lineage] = {}
-        # members' episodes render one at a time, like the champion's
+        # members' episodes render one at a time, like the tests'
         self.render_lock = threading.Lock()
 
     def _dir(self, run_id: str) -> Path:
@@ -149,7 +149,6 @@ class RunStore:
         row = {
             "step": step,
             "time": time.time(),
-            "champion": body.get("champion"),
             "ids": body["ids"],
             "parents": body["parents"],
             "species": body["species"],
@@ -181,24 +180,23 @@ class RunStore:
         with lineage.lock:
             return lineage.leaderboard(scope, sort, limit)
 
-    def champions(self, run_id: str) -> List[Dict[str, Any]]:
-        lineage = self.lineage(run_id)
-        with lineage.lock:
-            return lineage.champions()
-
     def players(self, run_id: str, genome_ids: Any) -> List[Dict[str, Any]]:
-        """Genomes by id and name (None for any not logged as members yet)."""
+        """Genomes by id, name and the species they were born into (None for any
+        not logged as members yet)."""
         lineage = self.lineage(run_id)
         with lineage.lock:
-            return [
-                {
-                    "id": int(g),
-                    "name": alias(int(g), int(lineage.birth_species[int(g)]))
-                    if lineage.known(int(g))
-                    else None,
-                }
-                for g in genome_ids
-            ]
+            players = []
+            for g in map(int, genome_ids):
+                known = lineage.known(g)
+                species = int(lineage.birth_species[g]) if known else None
+                players.append(
+                    {
+                        "id": g,
+                        "name": alias(g, species) if species is not None else None,
+                        "birth_species": species,
+                    }
+                )
+            return players
 
     def individual(self, run_id: str, genome_id: int, depth: int) -> Dict[str, Any]:
         lineage = self.lineage(run_id)
@@ -316,7 +314,7 @@ class RunStore:
 
     def member_episode_media(self, run_id: str, step: int, index: int) -> Path:
         """One of a generation's member episodes, rendered (the first time it's
-        asked for) like the champion's."""
+        asked for) like the tests'."""
         run_dir = self._dir(run_id)
         source = self._member_episode_files(run_dir)[step]
         rendered = run_dir / "member_episodes" / "rendered"
@@ -457,12 +455,14 @@ def render_episode(
         with np.load(path, allow_pickle=False) as npz:
             data = {name: npz[name] for name in npz.files}
         # who played each seat, if the run said, for the dashboard to name, with
-        # each one's reward over the episode if the run recorded it
+        # each one's reward over the episode if the run recorded it; a lone policy
+        # among bots says which seat is its
         ids = data.pop("players", None)
         players = None if ids is None else store.players(run_id, ids)
         if players is not None:
             final = data["rewards"][-1] if "rewards" in data else None
-            players = [_with_reward(p, final, seat) for seat, p in enumerate(players)]
+            seats = [int(data["policy"])] if "policy" in data else range(len(players))
+            players = [_with_reward(p, final, s) for s, p in zip(seats, players)]
         media = encode_media(RENDERERS[env](data))
         if media is None:
             raise TypeError(f"the {env!r} renderer returned nothing displayable")
@@ -517,8 +517,6 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(self.store.metrics(run_id, since))
                 case ["api", "runs", run_id, "media"]:
                     self._json(self.store.media(run_id, since))
-                case ["api", "runs", run_id, "champions"]:
-                    self._json(self.store.champions(run_id))
                 case ["api", "runs", run_id, "leaderboard"]:
                     board = self.store.leaderboard(
                         run_id,
@@ -646,12 +644,22 @@ class Handler(BaseHTTPRequestHandler):
                             f"unsupported media type {content_type!r}",
                         )
                         return
+                    body = self._body()
+                    # structured media (a network, say) may name the genomes it
+                    # shows, for the dashboard to name too
+                    players = None
+                    if content_type == "application/json":
+                        media = json.loads(body)
+                        ids = media.get("players") if isinstance(media, dict) else None
+                        if ids is not None:
+                            players = self.store.players(run_id, ids)
                     entry = self.store.add_media(
                         run_id,
                         key=query["key"][0],
                         step=int(query["step"][0]),
                         content_type=content_type,
-                        data=self._body(),
+                        data=body,
+                        players=players,
                     )
                     self._json(entry, HTTPStatus.CREATED)
                 case ["api", "runs", run_id, "episodes"]:

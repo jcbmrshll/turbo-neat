@@ -37,7 +37,6 @@ from neat.utils import apply_where, mask_data, round_to_integers
 class Population:
     batched_genome: Genome
     prev_batched_genome: Genome
-    champion: Genome
     next_innovation_id: jax.Array
     next_genome_id: jax.Array
     generation: jax.Array
@@ -444,7 +443,6 @@ def _init_population(
     return Population(
         batched_genome=batched_genome,
         prev_batched_genome=batched_genome,
-        champion=jax.tree.map(lambda x: x[0], batched_genome),
         next_innovation_id=jnp.int32(next_innovation_id),
         next_genome_id=jnp.int32(next_genome_id),
         generation=jnp.int32(generation),

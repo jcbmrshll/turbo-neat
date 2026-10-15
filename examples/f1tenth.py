@@ -6,13 +6,12 @@ or another car is out of the race, and stays on the track as a wreck for the oth
 to avoid. Each car sees a lidar sweep, its own speed, steering and heading, and the
 cars around it.
 
-The best genome of each generation races the reigning champion, the two taking
-alternate places on the grid. To see how good the best are, every --field-every
-generations the --cars fittest race each other (--field-races races, starting from
-every place on the grid in turn), and the monitor logs the field's mean and best
-distance, in metres, with one of their races. With --test bots, each new champion races pure
-pursuit bots that follow the track's centerline instead, scoring the distance it
-covers.
+To see how good the best are, every --test-every generations the --cars fittest
+race each other (--field-races races, starting from every place on the grid in
+turn), and the monitor logs the field's mean and best distance, in metres, with one
+of their races. With --test bots, the 10 fittest each race pure pursuit bots that
+follow the track's centerline instead, scoring the distance they cover, and the
+monitor shows the best one's race.
 
     uv run examples/f1tenth.py --generations 100
     uv run examples/f1tenth.py --cars 6 --monitor
@@ -38,11 +37,11 @@ from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfi
 from neat.fitness import (
     make_mp_field_fn,
     make_mp_fitness_fn,
-    make_mp_h2h_fitness_fn,
     make_test_fn,
 )
 from neat.neat import NEAT
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
+from neat.testing import make_field_test, make_top_k_test
 
 # The env's own lidar and wall check are too slow for a population: its lidar ray
 # marches in a while loop, which under vmap runs every ray for as long as the
@@ -499,8 +498,8 @@ def track_edges(race: F1TenthRace) -> np.ndarray:
 def make_episode_fn(race: F1TenthRace):
     """Races as raw car poses, speeds and steering, for the monitor to draw, with
     the track's walls. Packs the generation's fittest racing each other, or the
-    champion's race against the bots, and the members' recorded races at once (with
-    a leading race axis)."""
+    best tested genome's race against the bots, and the members' recorded races at
+    once (with a leading race axis)."""
     edges = track_edges(race).astype(np.float32)
     car_size = np.array([race.env.params.length, race.env.params.width])
     # the top speed, the steering lock, and the speed lost between recorded frames
@@ -533,9 +532,9 @@ def make_episode_fn(race: F1TenthRace):
             rewards=np.asarray(rewards),
         )
         if against_bots:
-            data["champion"] = np.asarray(state.seat[0])
+            data["policy"] = np.asarray(state.seat[0])
         # the generation's fittest racing each other, as against a race of members
-        # (several, with a leading race axis) or of the champion and the bots
+        # (several, with a leading race axis) or of the policy and the bots
         field = not against_bots and races == ()
         return Episode("f1tenth_field" if field else "f1tenth", **data)
 
@@ -555,8 +554,8 @@ def main():
         "--test-seconds",
         type=float,
         default=None,
-        help="length of the champion's race against the bots (the one the monitor "
-        "shows), if not --race-seconds",
+        help="length of the test races (the ones the monitor shows), if not "
+        "--race-seconds",
     )
     parser.add_argument(
         "--rounds", type=int, default=2, help="races each genome runs per generation"
@@ -573,21 +572,21 @@ def main():
         "--test",
         choices=["field", "bots"],
         default="field",
-        help="each generation's --cars fittest race each other, or each new champion "
-        "races the bots",
+        help="every --test-every generations, the --cars fittest race each other, or "
+        "the 10 fittest each race the bots",
     )
     parser.add_argument(
         "--field-races",
         type=int,
         default=16,
-        help="races the fittest run against each other (or the best against the "
-        "bots, with --test bots), each time",
+        help="races the fittest run against each other (or each against the bots, "
+        "with --test bots), each time",
     )
     parser.add_argument(
-        "--field-every",
+        "--test-every",
         type=int,
         default=10,
-        help="generations between the fittest racing each other",
+        help="generations between tests",
     )
     parser.add_argument("--population", type=int, default=1000, help="population size")
     parser.add_argument(
@@ -623,25 +622,29 @@ def main():
     # just stand there, so score straight through and keep the last crash in replays
     max_resets = None
     test_steps = round((args.test_seconds or args.race_seconds) / race.dt)
-    tests = {}
     if args.test == "bots":
-        tests["baseline_test_fn"] = make_test_fn(
-            RaceAgainstBots(race),
-            num_steps=test_steps,
-            num_episodes=args.field_races,
-            frames_every=race.record_every,
+        test_fn = make_top_k_test(
+            make_test_fn(
+                RaceAgainstBots(race),
+                num_steps=test_steps,
+                num_episodes=args.field_races,
+                frames_every=race.record_every,
+            ),
+            name="distance_against_bots",
         )
     else:
-        tests["field_test_fn"] = make_mp_field_fn(
-            race,
-            args.field_races,
-            test_steps,
-            max_resets=max_resets,
-            record_every=race.record_every,
-            record_fn=race.record_frame,
+        test_fn = make_field_test(
+            make_mp_field_fn(
+                race,
+                args.field_races,
+                test_steps,
+                max_resets=max_resets,
+                record_every=race.record_every,
+                record_fn=race.record_frame,
+            ),
+            size=args.cars,
+            name="field_distance",
         )
-        tests["field_size"] = args.cars
-        tests["field_every"] = args.field_every
 
     neat = NEAT(
         config=make_config(race.obs_size, race.act_size, args.cars, args.population),
@@ -656,14 +659,9 @@ def main():
             record_fn=race.record_frame,
             parallel_rounds=args.parallel_rounds,
         ),
-        # a lone car races the clock, so its best fitness so far is a fair test
-        h2h_test_fn=(
-            make_mp_h2h_fitness_fn(race, num_steps=race_steps, max_resets=max_resets)
-            if args.cars > 1
-            else None
-        ),
+        test_fn=test_fn,
+        test_every=args.test_every,
         monitor=Monitor(args.monitor, project="f1tenth") if args.monitor else None,
-        **tests,
     )
     neat.run(
         seed=args.seed,

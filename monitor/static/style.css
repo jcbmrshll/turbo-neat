@@ -415,15 +415,6 @@ table.board {
 
 .gname .sp { color: var(--dim); }
 .swatch { width: 8px; height: 8px; display: inline-block; margin-right: 7px; flex: none; }
-.tag {
-  font: 9.5px var(--mono);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  padding: 0 4px;
-  margin-left: 8px;
-}
 .glink { color: var(--fg); }
 .glink:hover { color: var(--accent); }
 .glink .sp { color: var(--dim); }
@@ -467,7 +458,6 @@ table.board {
 .ped .edge.dim { opacity: 0.06; }
 .ped .node { stroke: var(--panel); stroke-width: 2; cursor: pointer; }
 .ped .node.subject { stroke: var(--fg-strong); cursor: default; }
-.ped .champ { fill: none; stroke: var(--accent); stroke-width: 1.25; }
 .ped .lab { font: 9.5px var(--mono); fill: var(--mid); paint-order: stroke; stroke: var(--panel); stroke-width: 3px; }
 .ped .lab.subject { fill: var(--fg-strong); font-weight: 600; }
 .ped .gen { font: 9px var(--mono); fill: var(--faint); }
