@@ -3,7 +3,7 @@
     monitor = Monitor("http://localhost:8008", project="slimevolley")
     monitor.start(config=config.to_dict())
     monitor.log(step, {"max_fitness": 3.2, "episode": Episode("boids", boids=states)})
-    monitor.log(step, {"members": Members(ids, parents, species, fitness, champion)})
+    monitor.log(step, {"members": Members(ids, parents, species, fitness)})
     monitor.log(step, {"networks": Networks(ids, from_nodes, to_nodes, weights, ...)})
     monitor.log(step, {"episodes": Episodes(Episode("boids", boids=...), players)})
     monitor.finish()
@@ -70,7 +70,7 @@ class Episodes:
 class Members:
     """Every member of one generation, for the leaderboard and lineage views: their
     genome ids, their parents' ids (shape (n, 2), the fitter parent first, -1 for
-    none), species ids and fitness, plus the champion's genome id.
+    none), species ids and fitness.
 
     Arrays may still be on the device; they're copied off it when logged, so a
     background logging thread does the copy."""
@@ -81,13 +81,11 @@ class Members:
         parents: Any,
         species: Any,
         fitness: Any,
-        champion: Optional[Any] = None,
     ):
         self.ids = ids
         self.parents = parents
         self.species = species
         self.fitness = fitness
-        self.champion = champion
 
     def to_dict(self) -> Dict[str, Any]:
         fitness = np.asarray(self.fitness, dtype=np.float32)
@@ -98,7 +96,6 @@ class Members:
             # 6 significant digits keeps float32 noise out of the file; JSON has no
             # NaN or inf, so a diverged fitness is null
             "fitness": [float(f"{f:.6g}") if np.isfinite(f) else None for f in fitness],
-            "champion": None if self.champion is None else int(self.champion),
         }
 
 

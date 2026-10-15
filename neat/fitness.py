@@ -335,40 +335,6 @@ def fitness_mp(
     return totals / counts, recording
 
 
-def fitness_mp_h2h(
-    step_fn: Callable,
-    reset_fn: Callable,
-    rng: jax.Array,
-    genome_1: Genome,
-    genome_2: Genome,
-    num_players: int,
-    num_steps: int,
-    max_resets: Optional[int],
-    **kwargs,
-):
-    """genome_1 against genome_2 with the seats alternating between them, shifted
-    by one each game so that both start from every seat. genome_1 and genome_2 are
-    each one genome broadcast over the batch; the games seat as many players as the
-    batch holds (see rollout for max_resets). Returns each genome's mean reward per
-    seat."""
-    num_games = -(-genome_1.batch_size // num_players)
-    games, seats = np.arange(num_games)[:, None], np.arange(num_players)[None]
-    is_first = ((games + seats) % 2 == 0).ravel()
-
-    def seat(x, y):
-        shape = (num_games * num_players,) + x.shape[1:]
-        return mask_data(
-            jnp.broadcast_to(x[0], shape), jnp.broadcast_to(y[0], shape), is_first
-        )
-
-    seated = jax.tree.map(seat, genome_1, genome_2)
-    rewards, _ = play_seated(
-        step_fn, reset_fn, rng, seated, num_games, num_steps, max_resets, **kwargs
-    )
-    rewards = rewards.ravel()
-    return jnp.array([rewards[is_first].mean(), rewards[~is_first].mean()]), None
-
-
 def fitness_mp_field(
     step_fn: Callable,
     reset_fn: Callable,
@@ -482,22 +448,6 @@ def make_mp_fitness_fn(
         record_every=record_every,
         record_fn=record_fn,
         parallel_rounds=parallel_rounds,
-    )
-
-
-def make_mp_h2h_fitness_fn(
-    task: MultiPlayerTask, num_steps: int, max_resets: Optional[int] = 0
-) -> Callable:
-    assert task.num_players > 1, "a head-to-head needs at least two players"
-    assert num_steps > 0, "num_steps must be greater than 0"
-    assert max_resets is None or max_resets >= 0, "max_resets must be at least 0"
-    return partial(
-        fitness_mp_h2h,
-        step_fn=task.step_mp,
-        reset_fn=task.reset,
-        num_players=task.num_players,
-        num_steps=num_steps,
-        max_resets=max_resets,
     )
 
 

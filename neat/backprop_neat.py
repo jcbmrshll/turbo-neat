@@ -10,9 +10,10 @@ from neat.activations import ActivationSelector
 from neat.config import NEATConfig
 from neat.fitness import Recording
 from neat.genome import Genome, prepare_for_inference
-from neat.neat import NEAT, TestFn, evolve_one_generation, test_against_baseline
+from neat.neat import NEAT, evolve_one_generation
 from neat.population import Population
 from neat.species import species_pca
+from neat.testing import PopulationTestFn
 
 # called like a FitnessFn on a fresh batch of data; returns fitness (-loss) and
 # (weight grads, bias grads) of the loss for each genome, then, if it was made to
@@ -97,7 +98,8 @@ class BackpropNEAT(NEAT):
         self,
         config: NEATConfig,
         backprop_fn: BackpropFn,
-        test_fn: Optional[TestFn] = None,
+        test_fn: Optional[PopulationTestFn] = None,
+        test_every: int = 10,
         monitor: Optional[Monitor] = None,
     ):
         self.config = config
@@ -133,16 +135,4 @@ class BackpropNEAT(NEAT):
         self.map_species = jax.jit(
             partial(species_pca, num_species=config.selection_config.maximum_species)
         )
-        if test_fn is not None:
-            self.test_baseline = jax.jit(
-                partial(
-                    test_against_baseline,
-                    test_fn=test_fn,
-                    activation_selector=self.activation_selector,
-                )
-            )
-        else:
-            self.test_baseline = None
-
-        self.test_champion = None
-        self.test_field = None
+        self._init_test(test_fn, test_every)

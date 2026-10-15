@@ -1,11 +1,10 @@
 """Evolve a SlimeVolley policy by self-play.
 
-Genomes are paired off against each other for fitness. The best genome of each
-generation then challenges the reigning champion head-to-head, and each new champion
-is scored against EvoJAX's built-in baseline policy.
+Genomes are paired off against each other for fitness. Every 10th generation, the
+10 fittest are each scored against EvoJAX's built-in baseline policy.
 
-The population of 1000 wants a GPU; expect the score against the baseline to climb
-from about -10 to above -1 within the first 50 generations.
+The population of 1000 wants a GPU; expect the best score against the baseline to
+climb from about -10 to above -1 within the first 50 generations.
 
     uv run examples/slimevolley.py --generations 100
     uv run examples/slimevolley.py --monitor
@@ -25,9 +24,10 @@ from evojax.task.slimevolley import Game, GameState, SlimeVolley
 import neat.activations as act
 from monitor import DEFAULT_URL, Episode, Monitor
 from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfig
-from neat.fitness import make_mp_fitness_fn, make_mp_h2h_fitness_fn, make_test_fn
+from neat.fitness import make_mp_fitness_fn, make_test_fn
 from neat.neat import NEAT
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
+from neat.testing import make_top_k_test
 
 
 def get_random_ball_v(key: jax.Array) -> Tuple[jax.Array, jax.Array]:
@@ -224,9 +224,9 @@ def main():
             record=args.monitor is not None,
             parallel_rounds=2,
         ),
-        h2h_test_fn=make_mp_h2h_fitness_fn(selfplay, num_steps=1000),
-        baseline_test_fn=make_test_fn(
-            baseline, num_steps=1000, num_episodes=1000, frames_len=300
+        # every 10th generation's 10 fittest, over 1000 games each
+        test_fn=make_top_k_test(
+            make_test_fn(baseline, num_steps=1000, num_episodes=1000, frames_len=300)
         ),
         monitor=Monitor(args.monitor, project="slimevolley") if args.monitor else None,
     )

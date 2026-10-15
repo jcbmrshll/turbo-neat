@@ -7,8 +7,8 @@ episode. Each step scores up to 1 for a pole that's upright over a centered cart
 few episodes from different starts; on one, a lucky start can outscore a better
 policy.
 
-Expect the champion's average score over 1000 test episodes to pass 800 within the
-first 100 generations, which take a few minutes on a GPU. This config isn't tuned
+Every 10th generation, the 10 fittest are each tested over 1000 episodes. Expect
+the best of their average scores to pass 800 within the first 100 generations, which take a few minutes on a GPU. This config isn't tuned
 for --harder yet: there it stalls at about 400.
 
     uv run examples/cartpole.py --generations 100
@@ -28,6 +28,7 @@ from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfi
 from neat.fitness import make_fitness_fn, make_test_fn
 from neat.neat import NEAT
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
+from neat.testing import make_top_k_test
 
 NUM_STEPS = 1000
 NUM_EPISODES = 4
@@ -128,8 +129,9 @@ def main():
             num_episodes=NUM_EPISODES,
             record=args.monitor is not None,
         ),
-        baseline_test_fn=make_test_fn(
-            task=test_task, num_steps=NUM_STEPS, num_episodes=1000
+        # every 10th generation's 10 fittest, over 1000 episodes each
+        test_fn=make_top_k_test(
+            make_test_fn(task=test_task, num_steps=NUM_STEPS, num_episodes=1000)
         ),
         monitor=Monitor(args.monitor, project="cartpole") if args.monitor else None,
     )

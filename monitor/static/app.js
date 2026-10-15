@@ -8,18 +8,20 @@ const POLL_MS = 2000;
 const RUNS_POLL_MS = 5000;
 // a running run that hasn't logged for this long is probably dead
 const STALE_S = 180;
-// the stat tiles, in order, when the run logs them
+// the stat tiles, in order, when the run logs them; "max_*" stands for the best
+// score of each of the run's tests, e.g. max_fitness_against_baseline, and
+// fitness_against_baseline is what runs logged before tests named their metrics
 const HEADLINE = [
   "max_fitness",
   "mean_fitness",
+  "max_*",
   "fitness_against_baseline",
-  "challenger_fitness",
   "num_species",
   "mean_condensed_hidden_nodes",
   "mean_condensed_connections",
 ];
 // charts that lead the grid; the rest follow in the order they were first logged
-const CHART_ORDER = ["fitness", "fitness_against_baseline", "challenger_fitness"];
+const CHART_ORDER = ["fitness", "fitness_against_baseline"];
 const BOARD_LIMIT = 50;
 // the windows offered over the metric charts, in generations
 const CHART_WINDOWS = [50, 200, 1000];
@@ -49,8 +51,6 @@ const state = {
   activeTab: null,
   // the run tab's charts are drawn to its width, so they wait while it's hidden
   overviewStale: false,
-  // step -> that generation's champion ({id, name, birth_species})
-  champions: new Map(),
   // the metric charts show the last this-many generations, or all of them if
   // null; kept across runs and reloads
   chartWindow: Number(localStorage.getItem("chartWindow")) || null,
@@ -269,7 +269,6 @@ async function select(runId) {
     activeTab: null,
     overviewStale: false,
     overviewScroll: 0,
-    champions: new Map(),
   });
   renderSide();
   document.body.classList.remove("has-board");
@@ -280,7 +279,7 @@ async function select(runId) {
     overview: h("div", { class: "tab-panel" }),
     panels: h("div"),
     tiles: h("div", { class: "tiles" }),
-    mediaTitle: h("div", { class: "stitle", text: "Champion" }),
+    mediaTitle: h("div", { class: "stitle", text: "Media" }),
     media: h("div", { class: "media-grid" }),
     chartsTitle: h("div", { class: "stitle-row" }),
     charts: h("div", { class: "chart-grid" }),
@@ -341,7 +340,6 @@ async function pollRun() {
     // generation of metrics means the leaderboard has one too
     if (firstLoad || metrics.rows.length) {
       pollBoard();
-      pollChampions();
       const tab = activeTab();
       if (tab) pollMember(tab);
       // the rest catch up when they're shown
@@ -394,7 +392,9 @@ function latest(key) {
 }
 
 function renderTiles() {
-  const tiles = HEADLINE.filter((k) => latest(k) != null).map((k) =>
+  const tests = metricKeys().filter((k) => k.startsWith("max_") && !HEADLINE.includes(k));
+  const keys = HEADLINE.flatMap((k) => (k === "max_*" ? tests : [k]));
+  const tiles = keys.filter((k) => latest(k) != null).map((k) =>
     h(
       "div",
       { class: "tile" },
@@ -682,10 +682,10 @@ function relayoutOverview() {
 
 const MEDIA_TITLES = { episode: "episode", network: "network", species_pca: "species map" };
 const MEDIA_ORDER = ["episode", "network"];
-// the side the policy plays in the champion's game against an environment's
-// built-in baseline: evojax's single-player slimevolley gives it the right
+// the side the policy plays in a test game against an environment's built-in
+// baseline: evojax's single-player slimevolley gives it the right
 const BASELINE_SEAT = { slimevolley: 1 };
-// races against a field of bots: the champion's car is drawn in the first seat's
+// races against a field of bots: the tested car is drawn in the first seat's
 // colours wherever on the grid it started, and the bots each in another team's
 const BOT_RACES = new Set(["f1tenth"]);
 // races between the generation's fittest, in fitness order on the grid
@@ -751,7 +751,7 @@ function updateMediaCard(key, entries, card) {
       }),
     ),
   );
-  card.who.replaceChildren(...championLine(key, entry));
+  card.who.replaceChildren(...playerLine(key, entry));
   // swapping the element restarts a gif, so only do it when the entry changes
   const id = entry.file || `error-${entry.step}`;
   if (card.shown === id) return;
@@ -787,45 +787,36 @@ function updateMediaCard(key, entries, card) {
   }
 }
 
-// the champion's episode and network are that generation's champion's; name it,
-// and in a game against a built-in baseline, who played which side
-function championLine(key, entry) {
-  const champ = state.champions.get(entry.step);
-  if (!champ || !MEDIA_ORDER.includes(key)) return [];
-  const name = h("b", {}, genomeLink(champ.id, champ.name));
+// the episode and network shown are of the genomes the run's test picked; name
+// them, and in a game against a built-in baseline or bots, who played which side
+function playerLine(key, entry) {
+  if (!MEDIA_ORDER.includes(key)) return [];
+  const players = entry.players || [];
   if (key === "episode" && FIELD_RACES.has(entry.env)) {
     // the field on the grid, fittest first, each linking to the member
-    if (entry.players) {
+    if (players.length) {
       const who = (p) => (p.name ? genomeLink(p.id, p.name, { step: entry.step }) : `#${p.id}`);
-      return [matchup(entry.players.map((p, seat) => seatPlayer(who(p), seat, entry.env, p.reward)))];
+      return [matchup(players.map((p, seat) => seatPlayer(who(p), seat, entry.env, p.reward)))];
     }
     const text = "the generation's fittest racing each other, P1 the fittest";
     return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "dim", text })))];
   }
+  // runs from before tests named their genomes have none
+  const p = players[0];
+  if (!p) return [];
+  const name = h("b", {}, p.name ? genomeLink(p.id, p.name) : `#${p.id}`);
   if (key === "episode" && BOT_RACES.has(entry.env)) {
-    const champion = h("span", { class: "ep-player" }, h("i", { class: "swatch", style: seatOf(entry.env, 0).style }), name);
-    return [matchup([champion, h("span", { class: "ep-player" }, h("span", { text: "bots" }))])];
+    const score = p.reward == null ? [] : [h("span", { class: "seat", text: `${p.reward.toFixed(1)}${REWARD_UNITS[entry.env] || ""}` })];
+    const policy = h("span", { class: "ep-player" }, h("i", { class: "swatch", style: seatOf(entry.env, 0).style }), name, ...score);
+    return [matchup([policy, h("span", { class: "ep-player" }, h("span", { text: "bots" }))])];
   }
   const seat = key === "episode" ? BASELINE_SEAT[entry.env] : undefined;
   if (seat === undefined) {
-    return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "seat", text: "champion" }), swatch(champ.birth_species), name))];
+    return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "seat", text: "best tested" }), swatch(p.birth_species), name))];
   }
-  const players = [seatPlayer(name, seat, entry.env), seatPlayer(h("span", { text: "baseline" }), 1 - seat, entry.env)];
-  if (seat === 1) players.reverse();
-  return [matchup(players)];
-}
-
-async function pollChampions() {
-  const runId = state.runId;
-  try {
-    const champions = await api(`/api/runs/${runId}/champions`);
-    if (runId !== state.runId) return;
-    state.champions = new Map(champions.map((c) => [c.step, c]));
-    if (state.activeTab == null) renderMedia();
-    else state.overviewStale = true;
-  } catch {
-    // runs from before members were logged have none
-  }
+  const sides = [seatPlayer(name, seat, entry.env), seatPlayer(h("span", { text: "baseline" }), 1 - seat, entry.env)];
+  if (seat === 1) sides.reverse();
+  return [matchup(sides)];
 }
 
 // ---------------------------------------------------------------- network
@@ -1144,7 +1135,7 @@ function renderBoard() {
         onclick: () => openTab(r.id, { name: r.name }),
       },
       h("td", { class: "rank", text: i + 1 }),
-      h("td", { class: "who" }, swatch(r.birth_species), nameEl(r.name), r.champion && h("span", { class: "tag", text: "champ" })),
+      h("td", { class: "who" }, swatch(r.birth_species), nameEl(r.name)),
       h("td", { class: "num", text: fmt(r.fitness) }),
       h("td", { class: "num", text: fmt(r.best) }),
       h("td", { class: "num", text: r.age }),
@@ -1384,7 +1375,6 @@ function renderMember(tab) {
       swatch(ind.birth_species),
       h("h2", {}, nameEl(ind.name)),
       h("span", { class: "gid", text: `#${ind.id}` }),
-      ind.champion && h("span", { class: "tag", text: "champion" }),
     ),
     h(
       "div",
@@ -1405,7 +1395,6 @@ function renderMember(tab) {
     tile("generations", ind.age),
     tile("children", ind.children),
     tile("living descendants", `${ind.descendants}${share}`),
-    ind.champion_gens > 0 && tile("gens as champion", ind.champion_gens),
   );
 
   const depthCtl = h(
@@ -1421,7 +1410,7 @@ function renderMember(tab) {
     { class: "card" },
     h("div", { class: "card-hdr" }, h("span", { class: "title", text: "pedigree" }), h("span", { class: "spacer" }), depthCtl),
     pedBody,
-    h("div", { class: "net-foot", text: "fitter parent solid, mate dashed, line of descent highlighted · ringed members have been champion · click one to open it" }),
+    h("div", { class: "net-foot", text: "fitter parent solid, mate dashed, line of descent highlighted · click one to open it" }),
   );
 
   const popSeries = (key, name, color) => ({
@@ -1732,7 +1721,6 @@ function pedigreeView(ind, width) {
   }
   for (const n of nodes.values()) {
     const subject = n.id === ind.id;
-    if (n.champion_gens > 0) svg.append(h("circle", { class: "champ", cx: n.x, cy: n.y, r: subject ? 10.5 : 8.5 }));
     const node = h("circle", {
       class: `node${subject ? " subject" : ""}`,
       cx: n.x,

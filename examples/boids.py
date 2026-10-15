@@ -16,6 +16,7 @@ from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfi
 from neat.fitness import make_fitness_fn, make_test_fn
 from neat.neat import NEAT
 from neat.species import make_improvement_stagnation_fn
+from neat.testing import make_top_k_test
 
 NUM_STEPS = 100
 
@@ -119,8 +120,9 @@ def main():
         fitness_fn=make_fitness_fn(
             task=train_task, num_steps=NUM_STEPS, record=args.monitor is not None
         ),
-        baseline_test_fn=make_test_fn(
-            task=test_task, num_steps=NUM_STEPS, num_episodes=100
+        # every 10th generation's 10 fittest, over 100 episodes each
+        test_fn=make_top_k_test(
+            make_test_fn(task=test_task, num_steps=NUM_STEPS, num_episodes=100)
         ),
         monitor=Monitor(args.monitor, project="boids") if args.monitor else None,
     )

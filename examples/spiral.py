@@ -25,6 +25,7 @@ from neat.config import GenomeConfig, MutationConfig, NEATConfig, SelectionConfi
 from neat.fitness import Recording
 from neat.genome import Genome, forward
 from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
+from neat.testing import make_top_k_test
 
 NUM_POINTS = 1000
 
@@ -214,7 +215,8 @@ def main():
         make_config(),
         # record each member's scored batch for the monitor's member view
         backprop_fn=make_backprop_fn(generate, record=args.monitor is not None),
-        test_fn=make_test_fn(generate),
+        # every 10th generation's 10 fittest, on the same fresh data
+        test_fn=make_top_k_test(make_test_fn(generate)),
         monitor=Monitor(args.monitor, project="spiral") if args.monitor else None,
     )
     bneat.run(seed=args.seed, num_generations=args.generations, episode_fn=episode_fn)

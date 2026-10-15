@@ -629,8 +629,8 @@ def render_f1tenth(data: Dict[str, np.ndarray]) -> Video:
     speed lost in a step of full braking, to show when and how hard each car brakes,
     in the strip and on its rain light; and data["rewards"], (steps, cars), each
     car's reward so far, in metres, shown in the strip where there's room. With
-    data["champion"], the policy's car, the rest are bots, and the camera follows
-    the champion; without it, every car is a member, in its seat's livery, and the
+    data["policy"], the policy's car, the rest are bots, and the camera follows
+    the policy; without it, every car is a member, in its seat's livery, and the
     camera follows the leader."""
     edges, poses, crashed = data["edges"], data["poses"], data["crashed"]
     num_cars = poses.shape[1]
@@ -650,14 +650,12 @@ def render_f1tenth(data: Dict[str, np.ndarray]) -> Video:
     map_size = tuple(np.ceil((map_hi - map_lo) * map_scale).astype(int))
     lap_map = _track_image(edges, map_lo, map_scale, map_size, SUPERSAMPLE)
 
-    if "champion" in data:
-        # the champion in the first livery, and the bots in the rest, in grid order
-        champion = int(data["champion"])
+    if "policy" in data:
+        # the policy in the first livery, and the bots in the rest, in grid order
+        policy = int(data["policy"])
         bots = iter(LIVERIES[1 + b % (len(LIVERIES) - 1)] for b in range(num_cars))
-        liveries = [
-            LIVERIES[0] if i == champion else next(bots) for i in range(num_cars)
-        ]
-        followed = np.full(len(poses), champion)
+        liveries = [LIVERIES[0] if i == policy else next(bots) for i in range(num_cars)]
+        followed = np.full(len(poses), policy)
     else:
         liveries = [LIVERIES[i % len(LIVERIES)] for i in range(num_cars)]
         followed = _leaders(edges, poses, crashed)
