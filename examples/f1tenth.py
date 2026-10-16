@@ -558,7 +558,7 @@ def main():
         "--race-seconds",
     )
     parser.add_argument(
-        "--rounds", type=int, default=2, help="races each genome runs per generation"
+        "--rounds", type=int, default=4, help="races each genome runs per generation"
     )
     parser.add_argument(
         "--parallel-rounds",

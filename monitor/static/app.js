@@ -23,11 +23,8 @@ const HEADLINE = [
 // charts that lead the grid; the rest follow in the order they were first logged
 const CHART_ORDER = ["fitness", "fitness_against_baseline"];
 const BOARD_LIMIT = 50;
-// the windows offered over the metric charts, in generations
+// the windows offered over the metric charts, in epochs
 const CHART_WINDOWS = [50, 200, 1000];
-// how many generations of parents the pedigree starts with, and steps by
-const PEDIGREE_DEPTH = 6;
-const PEDIGREE_STEP = 3;
 
 const state = {
   runs: [],
@@ -37,13 +34,14 @@ const state = {
   metricsNext: 0,
   media: [],
   mediaNext: 0,
-  // media key -> index into that key's entries, or null to follow the latest
-  mediaSel: {},
+  // the epoch the run tab and the leaderboard show, or null to follow the latest
+  epoch: null,
   connected: true,
   // the leaderboard panel
   board: null,
   boardScope: "alive",
-  boardSort: "fitness",
+  // the species the leaderboard shows, or null for all of them
+  boardSpecies: null,
   speciesNames: {},
   // the open member tabs, in order (see openTab), and the one shown: a genome id,
   // or null for the run's own tab
@@ -51,7 +49,7 @@ const state = {
   activeTab: null,
   // the run tab's charts are drawn to its width, so they wait while it's hidden
   overviewStale: false,
-  // the metric charts show the last this-many generations, or all of them if
+  // the metric charts show the last this-many epochs, or all of them if
   // null; kept across runs and reloads
   chartWindow: Number(localStorage.getItem("chartWindow")) || null,
 };
@@ -118,11 +116,11 @@ function started(t) {
   });
 }
 
-// "41 / 300 gens" (generations done) when the run said how long it will be
+// "41 / 300 epochs" (epochs done) when the run said how long it will be
 function progress(run) {
   if (run.step == null) return "";
   const total = run.num_generations;
-  return total ? `${run.step + 1} / ${total} gens` : `gen ${run.step}`;
+  return total ? `${run.step + 1} / ${total} epochs` : `epoch ${run.step}`;
 }
 
 function status(run) {
@@ -177,7 +175,7 @@ function renderSide() {
     if (!byProject.has(run.project)) byProject.set(run.project, []);
     byProject.get(run.project).push(run);
   }
-  const children = [];
+  const children = [h("div", { class: "stitle side-title", text: "Runs" })];
   for (const [project, runs] of byProject) {
     children.push(h("div", { class: "side-hdr", text: project }));
     for (const run of runs) {
@@ -196,12 +194,12 @@ function renderSide() {
           h("span", { class: `dot ${status(run)}`, title: status(run) }),
           h("span", { class: "name", text: run.name }),
           h("span", { class: "step", text: progress(run) }),
-          h("span", { class: "when", text: `${started(run.created)} · ${ago(run.updated)}` }),
+          h("span", { class: "when", text: [run.mean_fitness != null && `fitness ${fmt(run.mean_fitness)}`, ago(run.updated)].filter(Boolean).join(" · ") }),
         ),
       );
     }
   }
-  if (!children.length) children.push(h("div", { class: "side-hdr", text: "no runs" }));
+  if (!state.runs.length) children.push(h("div", { class: "side-hdr", text: "no runs" }));
   side.replaceChildren(...children);
 }
 
@@ -220,7 +218,6 @@ function setConnected(ok) {
   state.connected = ok;
   const el = document.getElementById("conn");
   el.textContent = ok ? "" : "server unreachable";
-  el.classList.toggle("down", !ok);
 }
 
 // ---------------------------------------------------------------- run view
@@ -243,7 +240,7 @@ function renderEmpty() {
       h("h1", { text: "No runs yet" }),
       h("p", { text: "Start a training run with the monitor attached:" }),
       h("p", {}, h("code", { text: "uv run examples/boids.py --monitor" })),
-      h("p", { text: "It will show up here as soon as it logs its first generation." }),
+      h("p", { text: "It will show up here as soon as it logs its first epoch." }),
     ),
   );
 }
@@ -262,8 +259,9 @@ async function select(runId) {
     metricsNext: 0,
     media: [],
     mediaNext: 0,
-    mediaSel: {},
+    epoch: null,
     board: null,
+    boardSpecies: null,
     speciesNames: {},
     tabs: [],
     activeTab: null,
@@ -276,6 +274,7 @@ async function select(runId) {
   view = {
     head: h("div", { class: "runhead" }),
     tabbar: h("nav", { class: "tabs" }),
+    epochBar: epochBar(),
     overview: h("div", { class: "tab-panel" }),
     panels: h("div"),
     tiles: h("div", { class: "tiles" }),
@@ -297,7 +296,8 @@ async function select(runId) {
     view.config,
   );
   renderChartsTitle();
-  main.replaceChildren(h("div", { class: "page" }, view.head, view.tabbar, view.overview, view.panels));
+  const top = h("div", { class: "topbar" }, view.tabbar, view.epochBar.el);
+  main.replaceChildren(h("div", { class: "page" }, view.head, top, view.overview, view.panels));
   main.scrollTop = 0;
   // the member tabs this run had open, then the one in the address
   for (const tab of savedTabs(runId)) addTab(tab.id, tab.name);
@@ -328,6 +328,7 @@ async function pollRun() {
     renderHead();
     if (firstLoad) renderConfig();
     if (firstLoad || metrics.rows.length) {
+      view.epochBar.update();
       renderTiles();
       if (state.activeTab == null) renderCharts();
       else state.overviewStale = true;
@@ -383,8 +384,10 @@ function renderHead() {
   );
 }
 
+// the latest value of a metric, as of the epoch shown
 function latest(key) {
   for (let i = state.rows.length - 1; i >= 0; i--) {
+    if (state.epoch != null && state.rows[i].step > state.epoch) continue;
     const v = state.rows[i][key];
     if (v != null) return v;
   }
@@ -406,10 +409,61 @@ function renderTiles() {
   view.tiles.hidden = !tiles.length;
 }
 
+// ---------------------------------------------------------------- epoch
+
+// each chart's epoch line, to move without redrawing the chart
+const chartMarkers = [];
+
+// show the run as it was at an epoch (null: the latest, following new ones)
+function setEpoch(epoch) {
+  const last = state.rows.at(-1)?.step;
+  state.epoch = epoch == null || epoch >= last ? null : epoch;
+  view.epochBar.update();
+  renderTiles();
+  chartMarkers.forEach((place) => place());
+  renderMedia();
+  clearTimeout(setEpoch.board);
+  // dragging the slider asks for the leaderboard once it settles
+  setEpoch.board = setTimeout(pollBoard, 120);
+}
+
+// the slider across the top that picks the epoch shown, with a box to type one in;
+// made once per run, and updated in place so a drag isn't interrupted
+function epochBar() {
+  const range = h("input", { type: "range", min: 0, max: 0, value: 0, step: 1 });
+  const box = h("input", { type: "number", class: "epoch-box", min: 0, step: 1, title: "type an epoch" });
+  const of = h("span", { class: "dim" });
+  const latest = h("button", { text: "latest", title: "back to the current epoch, following new ones", onclick: () => setEpoch(null) });
+  range.addEventListener("input", () => setEpoch(Number(range.value)));
+  // typed epochs apply on enter or leaving the box, clamped to the run's
+  box.addEventListener("change", () => {
+    const first = state.rows[0]?.step ?? 0;
+    if (box.value !== "") setEpoch(Math.max(first, Math.round(Number(box.value))));
+    else update();
+  });
+  box.addEventListener("keydown", (e) => e.key === "Enter" && box.blur());
+  const el = h("div", { class: "epoch-bar scrub" }, h("span", { class: "dim", text: "epoch" }), range, box, of, latest);
+  function update() {
+    const first = state.rows[0]?.step ?? 0, last = state.rows.at(-1)?.step ?? 0;
+    el.hidden = !state.rows.length;
+    range.min = box.min = first;
+    range.max = box.max = last;
+    range.value = state.epoch ?? last;
+    // not while it's being typed in
+    if (document.activeElement !== box) box.value = state.epoch ?? last;
+    of.textContent = `of ${last}`;
+    latest.disabled = state.epoch == null;
+    el.classList.toggle("pinned", state.epoch != null);
+  }
+  return { el, update };
+}
+
 // ---------------------------------------------------------------- charts
 
-// Group metric keys into charts: "a/b" keys chart together under "a", and
-// max_/mean_/min_ variants of one quantity chart together under its name.
+// Group metric keys into charts: "a/b" keys chart together under "a",
+// max_/mean_/min_ variants of one quantity chart together under its name, and a
+// condensed quantity (e.g. mean_condensed_connections, only what's on a path from
+// the inputs to the outputs) charts with the whole of it (mean_connections).
 function groupMetrics(keys) {
   const groups = new Map();
   const add = (group, series, key) => {
@@ -420,8 +474,13 @@ function groupMetrics(keys) {
   for (const key of keys) {
     const slash = key.lastIndexOf("/");
     const stat = key.match(/^(max|mean|min)_(.+)$/);
+    const whole = key.replace(/^(max|mean|min)_condensed_/, "$1_");
     if (slash > 0) {
       add(key.slice(0, slash), key.slice(slash + 1), key);
+    } else if (whole !== key && set.has(whole)) {
+      add(whole, "condensed", key);
+    } else if (stat && set.has(`${stat[1]}_condensed_${stat[2]}`)) {
+      add(key, "all", key);
     } else if (stat && ["max", "mean", "min"].filter((s) => set.has(`${s}_${stat[2]}`)).length > 1) {
       add(stat[2], stat[1], key);
     } else {
@@ -454,13 +513,27 @@ function metricKeys() {
   return keys;
 }
 
+// whether the run has only ever had one species, which leaves the species charts
+// and map with nothing to compare
+function singleSpecies() {
+  const ids = new Set();
+  for (const k of metricKeys()) {
+    const m = k.match(/^species_[^/]+\/s(\d+)$/);
+    if (m) ids.add(m[1]);
+  }
+  return ids.size <= 1;
+}
+
 function renderCharts() {
-  const groups = groupMetrics(metricKeys());
+  chartMarkers.length = 0;
+  const oneSpecies = singleSpecies();
+  const groups = groupMetrics(metricKeys()).filter((g) => !(oneSpecies && g.name.startsWith("species_")));
   view.chartsTitle.hidden = !groups.length;
   // the window ends at the newest generation logged
   const last = state.rows.at(-1)?.step;
   const from = state.chartWindow && last != null ? last - state.chartWindow + 1 : -Infinity;
-  view.charts.replaceChildren(...groups.map((g) => chartCard(g, from)));
+  const media = CHART_MEDIA.map((k) => view.mediaCards[k]?.el).filter(Boolean);
+  view.charts.replaceChildren(...groups.map((g) => chartCard(g, from)), ...media);
 }
 
 function setChartWindow(n) {
@@ -471,7 +544,7 @@ function setChartWindow(n) {
   if (state.rows.length) renderCharts();
 }
 
-// "Metrics", and the window of generations the charts show: all, a preset, or any N
+// "Metrics", and the window of epochs the charts show: all, a preset, or any N
 function renderChartsTitle() {
   const win = state.chartWindow;
   const toggle = (n, text, title) =>
@@ -481,7 +554,7 @@ function renderChartsTitle() {
     min: 1,
     step: 1,
     placeholder: "N",
-    title: "show the last N generations",
+    title: "show the last N epochs",
     value: win && !CHART_WINDOWS.includes(win) ? win : null,
     class: win && !CHART_WINDOWS.includes(win) ? "on" : null,
     onchange: (e) => setChartWindow(Number(e.target.value)),
@@ -494,10 +567,10 @@ function renderChartsTitle() {
       "span",
       { class: "scrub" },
       h("span", { class: "dim", text: "last" }),
-      toggle(null, "all", "every generation"),
-      CHART_WINDOWS.map((n) => toggle(n, fmt(n), `the last ${n} generations`)),
+      toggle(null, "all", "every epoch"),
+      CHART_WINDOWS.map((n) => toggle(n, fmt(n), `the last ${n} epochs`)),
       custom,
-      h("span", { class: "dim", text: "gens" }),
+      h("span", { class: "dim", text: "epochs" }),
     ),
   );
 }
@@ -603,18 +676,38 @@ function lineChart(series, width) {
     svg.append(h("path", { class: "line", d, stroke: s.color }));
   }
 
-  // hover: a crosshair snapped to the nearest logged step, every series in one tooltip
+  // the epoch shown, when it isn't the latest
+  const mark = h("line", { class: "epoch-mark", y1: pad.t, y2: H - pad.b });
+  const placeMark = () => {
+    const on = state.epoch != null && state.epoch >= x0 && state.epoch <= x1;
+    mark.setAttribute("visibility", on ? "visible" : "hidden");
+    if (on) {
+      mark.setAttribute("x1", sx(state.epoch));
+      mark.setAttribute("x2", sx(state.epoch));
+    }
+  };
+  placeMark();
+  chartMarkers.push(placeMark);
+  svg.append(mark);
+
+  // hover: a crosshair snapped to the nearest logged step, every series in one tooltip;
+  // a click shows that epoch
   const steps = [...new Set(xs)].sort((a, b) => a - b);
   const lookup = series.map((s) => new Map(s.points));
   const cross = h("line", { class: "cross", y1: pad.t, y2: H - pad.b, visibility: "hidden" });
   const dots = series.map((s) => h("circle", { class: "hover-dot", r: 4, fill: s.color, visibility: "hidden" }));
   svg.append(cross, ...dots);
-  svg.addEventListener("pointermove", (e) => {
+  const nearest = (e) => {
     const r = svg.getBoundingClientRect();
     const px = ((e.clientX - r.left) / r.width) * W;
     const target = x0 + ((px - pad.l) / (W - pad.l - pad.r)) * (x1 - x0);
     let best = steps[0];
     for (const st of steps) if (Math.abs(st - target) < Math.abs(best - target)) best = st;
+    return best;
+  };
+  svg.addEventListener("click", (e) => setEpoch(nearest(e)));
+  svg.addEventListener("pointermove", (e) => {
+    const best = nearest(e);
     cross.setAttribute("x1", sx(best));
     cross.setAttribute("x2", sx(best));
     cross.setAttribute("visibility", "visible");
@@ -632,7 +725,7 @@ function lineChart(series, width) {
     showTip(
       e.clientX,
       e.clientY,
-      h("div", { class: "head", text: `gen ${best}` }),
+      h("div", { class: "head", text: `epoch ${best}` }),
       ...rows.map(([v, s]) =>
         h(
           "div",
@@ -671,7 +764,7 @@ window.addEventListener("resize", () => {
 function relayoutOverview() {
   state.overviewStale = false;
   if (state.rows.length) renderCharts();
-  // networks are drawn to fit; leave images alone so gifs don't restart
+  // the species map is drawn to fit; leave images alone so gifs don't restart
   for (const card of Object.values(view.mediaCards)) {
     if (card.shown?.endsWith(".json")) card.shown = null;
   }
@@ -680,8 +773,14 @@ function relayoutOverview() {
 
 // ---------------------------------------------------------------- media
 
-const MEDIA_TITLES = { episode: "episode", network: "network", species_pca: "species map" };
-const MEDIA_ORDER = ["episode", "network"];
+const MEDIA_TITLES = { episode: "sample episode", species_pca: "species map" };
+const MEDIA_ORDER = ["episode"];
+// runs from before the test's network was dropped logged it; members' networks are
+// on their own tabs
+const HIDDEN_MEDIA = new Set(["network"]);
+// media drawn as charts, which sit at the end of the chart grid rather than with
+// the episode
+const CHART_MEDIA = ["species_pca"];
 // the side the policy plays in a test game against an environment's built-in
 // baseline: evojax's single-player slimevolley gives it the right
 const BASELINE_SEAT = { slimevolley: 1 };
@@ -693,7 +792,9 @@ const FIELD_RACES = new Set(["f1tenth_field"]);
 
 function mediaByKey() {
   const byKey = new Map();
+  const oneSpecies = singleSpecies();
   for (const m of state.media) {
+    if (HIDDEN_MEDIA.has(m.key) || (oneSpecies && m.key === "species_pca")) continue;
     if (!byKey.has(m.key)) byKey.set(m.key, []);
     byKey.get(m.key).push(m);
   }
@@ -707,7 +808,7 @@ function mediaByKey() {
 
 function renderMedia() {
   const groups = mediaByKey();
-  view.mediaTitle.hidden = !groups.length;
+  view.mediaTitle.hidden = !groups.some(([key]) => !CHART_MEDIA.includes(key));
   for (const [key, entries] of groups) {
     let card = view.mediaCards[key];
     if (!card) {
@@ -718,38 +819,24 @@ function renderMedia() {
         foot: h("div"),
         shown: null,
       };
-      card.el = h("div", { class: "card" }, card.hdr, card.body, card.who, card.foot);
+      card.el = h("div", { class: "card media-card" }, card.hdr, card.body, card.who, card.foot);
       view.mediaCards[key] = card;
-      view.media.append(card.el);
+      if (CHART_MEDIA.includes(key)) view.charts.append(card.el);
+      else view.media.append(card.el);
     }
     updateMediaCard(key, entries, card);
   }
 }
 
+// a card shows its media from the epoch shown, or the last epoch before it that has
+// some (tests log their episode only every so often)
 function updateMediaCard(key, entries, card) {
-  const sel = state.mediaSel[key];
-  const idx = sel == null ? entries.length - 1 : sel;
-  const entry = entries[idx];
-  const set = (i) => {
-    state.mediaSel[key] = i >= entries.length - 1 ? null : Math.max(0, i);
-    updateMediaCard(key, entries, card);
-  };
+  let entry = entries[0];
+  for (const e of entries) if (state.epoch == null || e.step <= state.epoch) entry = e;
   card.hdr.replaceChildren(
     h("span", { class: "title", text: MEDIA_TITLES[key] || key.replaceAll("_", " ") }),
     h("span", { class: "spacer" }),
-    h(
-      "span",
-      { class: "scrub" },
-      h("button", { onclick: () => set(idx - 1), disabled: idx === 0, title: "previous", text: "‹" }),
-      h("span", { class: "pos", text: `gen ${entry.step}` }),
-      h("button", { onclick: () => set(idx + 1), disabled: idx === entries.length - 1, title: "next", text: "›" }),
-      h("button", {
-        class: sel == null ? "on" : null,
-        onclick: () => set(entries.length - 1),
-        title: "follow the newest",
-        text: "latest",
-      }),
-    ),
+    h("span", { class: "latest", text: `epoch ${entry.step}` }),
   );
   card.who.replaceChildren(...playerLine(key, entry));
   // swapping the element restarts a gif, so only do it when the entry changes
@@ -768,11 +855,7 @@ function updateMediaCard(key, entries, card) {
       .then((r) => r.json())
       .then((data) => {
         if (card.shown !== entry.file) return;
-        if (data.type === "network") {
-          const { svg, summary } = networkView(data, card.body.clientWidth - 22);
-          card.body.replaceChildren(svg);
-          card.foot.replaceChildren(h("div", { class: "net-foot", text: summary }));
-        } else if (data.type === "species_pca") {
+        if (data.type === "species_pca") {
           const { svg, summary } = speciesMapView(data, card.body.clientWidth - 22);
           card.body.replaceChildren(svg);
           card.foot.replaceChildren(h("div", { class: "net-foot", text: summary }));
@@ -783,12 +866,12 @@ function updateMediaCard(key, entries, card) {
   } else if (entry.file.endsWith(".mp4")) {
     card.body.replaceChildren(h("video", { src, autoplay: true, loop: true, muted: true, controls: true }));
   } else {
-    card.body.replaceChildren(h("img", { src, alt: `${key} at gen ${entry.step}` }));
+    card.body.replaceChildren(h("img", { src, alt: `${key} at epoch ${entry.step}` }));
   }
 }
 
-// the episode and network shown are of the genomes the run's test picked; name
-// them, and in a game against a built-in baseline or bots, who played which side
+// the episode shown is of the genomes the run's test picked; name them, and in a
+// game against a built-in baseline or bots, who played which side
 function playerLine(key, entry) {
   if (!MEDIA_ORDER.includes(key)) return [];
   const players = entry.players || [];
@@ -798,7 +881,7 @@ function playerLine(key, entry) {
       const who = (p) => (p.name ? genomeLink(p.id, p.name, { step: entry.step }) : `#${p.id}`);
       return [matchup(players.map((p, seat) => seatPlayer(who(p), seat, entry.env, p.reward)))];
     }
-    const text = "the generation's fittest racing each other, P1 the fittest";
+    const text = "the epoch's fittest racing each other, P1 the fittest";
     return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "dim", text })))];
   }
   // runs from before tests named their genomes have none
@@ -1047,7 +1130,9 @@ function genomeLink(id, name, at = null) {
 
 async function pollBoard() {
   const runId = state.runId;
-  const q = `scope=${state.boardScope}&sort=${state.boardSort}&limit=${BOARD_LIMIT}`;
+  let q = `scope=${state.boardScope}&limit=${BOARD_LIMIT}`;
+  if (state.boardSpecies != null) q += `&species=${state.boardSpecies}`;
+  if (state.epoch != null) q += `&epoch=${state.epoch}`;
   try {
     const board = await api(`/api/runs/${runId}/leaderboard?${q}`);
     if (runId !== state.runId) return;
@@ -1065,13 +1150,6 @@ async function pollBoard() {
   }
 }
 
-const BOARD_SORTS = [
-  { sort: "fitness", label: "fitness", title: "fitness in its latest generation" },
-  { sort: "best", label: "best", title: "best fitness in any generation" },
-  { sort: "age", label: "gens", title: "generations in the population" },
-  { sort: "children", label: "kids", title: "children" },
-];
-
 // the leaderboard, in the panel on the right; it's there whenever the run logged
 // its members
 function renderBoard() {
@@ -1083,108 +1161,93 @@ function renderBoard() {
     panel.replaceChildren();
     return;
   }
+  const allTime = state.boardScope === "all";
   const toggle = (on, text, title, onclick) => h("button", { class: on ? "on" : null, text, title, onclick });
   const scopes = h(
     "span",
     { class: "scrub" },
-    [["alive", "this gen"], ["all", "all time"]].map(([value, text]) =>
+    [["alive", "this epoch"], ["all", "all time"]].map(([value, text]) =>
       toggle(state.boardScope === value, text, null, () => {
         state.boardScope = value;
-        // all time defaults to the best ever, this generation to the latest
-        state.boardSort = value === "all" ? "best" : "fitness";
         pollBoard();
       }),
     ),
   );
-  const sorts = h(
+  // the species there are, biggest first; one picked that has since died out stays
+  // in the list, with no members
+  const choices = [...board.species];
+  const picked = state.boardSpecies;
+  if (picked != null && !choices.some((s) => s.id === picked)) {
+    choices.push({ id: picked, name: state.speciesNames[picked] ?? `s${picked}`, members: 0 });
+  }
+  const filter = h(
     "span",
     { class: "scrub" },
-    h("span", { class: "dim", text: "by" }),
-    BOARD_SORTS.map((c) =>
-      toggle(state.boardSort === c.sort, c.label, c.title, () => {
-        state.boardSort = c.sort;
-        pollBoard();
-      }),
+    picked != null && swatch(picked),
+    h(
+      "select",
+      {
+        class: picked != null ? "on" : null,
+        title: allTime ? "the species each was in when last seen" : "the species each is in",
+        onchange: (e) => {
+          state.boardSpecies = e.target.value === "" ? null : Number(e.target.value);
+          pollBoard();
+        },
+      },
+      h("option", { value: "", text: `all species (${board.species.length})` }),
+      choices.map((s) => h("option", { value: s.id, text: `${s.name} · ${s.members}`, selected: s.id === picked })),
     ),
   );
-  const th = (text, cls, sort) =>
-    h("th", { class: [cls, sort && sort === state.boardSort && "on"].filter(Boolean).join(" ") || null, text });
   const head = h(
     "tr",
     {},
-    th("#", "rank"),
-    th("individual"),
-    th("fitness", "num", "fitness"),
-    th("best", "num", "best"),
-    th("gens", "num", "age"),
-    th("kids", "num", "children"),
-    h("th", { text: "rank over life", title: "its rank by fitness in each generation it was in" }),
+    h("th", { class: "rank", text: "#" }),
+    h("th", { text: "individual" }),
+    h("th", { class: "num", text: "fitness", title: "fitness in its latest epoch" }),
+    allTime && h("th", { class: "num", text: "generation", title: "the generation it was born into: the epoch it joined the population" }),
+    h("th", { class: "num", text: "epochs", title: "epochs in the population" }),
+    h("th", { class: "num", text: "offspring" }),
   );
-  // in this generation, rank lines share one time axis so longevity shows
-  const shared = state.boardScope === "alive" && {
-    x0: Math.min(...board.rows.map((r) => r.history[0]?.[0] ?? board.step)),
-    x1: board.step,
-  };
   const open = new Set(state.tabs.map((t) => t.id));
   const rows = board.rows.map((r, i) =>
     h(
       "tr",
       {
         class: ["row", r.id === state.activeTab && "sel", open.has(r.id) && "open", !r.alive && "gone"].filter(Boolean).join(" "),
-        title: `${r.name} · ${r.species_name}${r.alive ? `, born gen ${r.born}` : `, gen ${r.born}–${r.last}`}`,
+        title: `${r.name} · ${r.species_name} · generation ${r.born}, ${r.alive ? `alive since epoch ${r.born}` : `alive epochs ${r.born}–${r.last}`}`,
         onclick: () => openTab(r.id, { name: r.name }),
       },
       h("td", { class: "rank", text: i + 1 }),
       h("td", { class: "who" }, swatch(r.birth_species), nameEl(r.name)),
       h("td", { class: "num", text: fmt(r.fitness) }),
-      h("td", { class: "num", text: fmt(r.best) }),
+      allTime && h("td", { class: "num", text: r.born }),
       h("td", { class: "num", text: r.age }),
       h("td", { class: "num", text: r.children }),
-      h(
-        "td",
-        { title: r.history.length ? `rank ${r.history.at(-1)[2]} of ${board.population} in gen ${r.history.at(-1)[0]}` : null },
-        rankline(r.history, board.population, speciesColor(r.birth_species), shared),
-      ),
     ),
   );
+  if (!rows.length) {
+    const who = state.speciesNames[picked] ?? `s${picked}`;
+    rows.push(h("tr", {}, h("td", { class: "dim", colspan: 6, text: `no ${who} ${allTime ? "yet" : "in this epoch"}` })));
+  }
   // the table keeps its scroll from one generation to the next
   if (!panel.firstChild) panel.append(h("div", { class: "bp-head" }), h("div", { class: "bp-table" }));
   const [top, wrap] = panel.children;
+  // rebuilding the species list while it's open would close it
+  const choosing = top.contains(document.activeElement) && document.activeElement.tagName === "SELECT";
   top.replaceChildren(
     h("div", { class: "stitle", text: "Leaderboard" }),
-    h("div", { class: "bp-sub", text: `gen ${board.step} · ${board.population} members · ${board.total.toLocaleString("en")} seen` }),
-    h("div", { class: "bp-controls" }, scopes, sorts),
+    h("div", { class: "bp-sub", text: `epoch ${board.step} · ${board.population} members · ${board.total.toLocaleString("en")} seen` }),
+    choosing ? top.querySelector(".bp-controls") : h("div", { class: "bp-controls" }, scopes, filter),
   );
   const scrolled = wrap.scrollTop;
   wrap.replaceChildren(h("table", { class: "board" }, h("thead", {}, head), h("tbody", {}, rows)));
   wrap.scrollTop = scrolled;
 }
 
-// a member's rank over its life ([step, fitness, rank] points), first place at the
-// top, on one log scale (1 to the population size) for every row so they compare;
-// `domain` ({x0, x1}) puts rows on one time axis too
-function rankline(points, population, color, domain) {
-  const W = 64, H = 16;
-  const svg = h("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, width: W, height: H });
-  const pts = points.map(([step, , rank]) => [step, rank]);
-  if (!pts.length) return svg;
-  const x0 = domain ? domain.x0 : pts[0][0];
-  const x1 = domain ? domain.x1 : pts[pts.length - 1][0];
-  const sx = (x) => 3 + (x1 === x0 ? 1 : (x - x0) / (x1 - x0)) * (W - 6);
-  const sy = (rank) => 3 + (Math.log(rank) / Math.log(Math.max(2, population))) * (H - 6);
-  if (pts.length > 1) {
-    const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${sx(x).toFixed(1)},${sy(y).toFixed(1)}`).join("");
-    svg.append(h("path", { d, stroke: color, fill: "none", "stroke-width": 1.25 }));
-  }
-  const [lx, ly] = pts[pts.length - 1];
-  svg.append(h("circle", { cx: sx(lx), cy: sy(ly), r: 2, fill: color }));
-  return svg;
-}
-
 // ---------------------------------------------------------------- tabs
 
 // The run's own tab is always there; each member opened gets a tab of its own,
-// which keeps its place (pedigree depth, the generation and game it shows, how far
+// which keeps its place (the generation and game it shows, how far
 // down it's scrolled) while others are shown.
 
 function activeTab() {
@@ -1211,7 +1274,6 @@ function addTab(id, name) {
       id,
       name: name || null,
       individual: null,
-      depth: PEDIGREE_DEPTH,
       // the generation of its life the network and episode cards show (pinned to
       // its latest when first shown), and the game shown when it was opened on
       // one (by the game's index), rather than its own
@@ -1318,15 +1380,15 @@ function renderTabs() {
 // ---------------------------------------------------------------- member tab
 
 async function pollMember(tab) {
-  const runId = state.runId, depth = tab.depth;
+  const runId = state.runId;
   let data;
   try {
-    data = await api(`/api/runs/${runId}/individuals/${tab.id}?depth=${depth}`);
+    data = await api(`/api/runs/${runId}/individuals/${tab.id}`);
   } catch (e) {
     if (!String(e.message).startsWith("404")) return;
     data = { missing: true, id: tab.id };
   }
-  if (runId !== state.runId || !state.tabs.includes(tab) || depth !== tab.depth) return;
+  if (runId !== state.runId || !state.tabs.includes(tab)) return;
   tab.stale = false;
   // a new generation changes little about most members; skip redrawing when nothing did
   if (JSON.stringify(data) === JSON.stringify(tab.individual)) return;
@@ -1352,7 +1414,7 @@ function renderMember(tab) {
   }
   const sep = () => h("span", { class: "sep", text: "·" });
   const [parent, mate] = ind.parents;
-  const nameOf = (id) => ind.pedigree.nodes.find((n) => n.id === id)?.name;
+  const nameOf = (id) => ind.pedigree.find((n) => n.id === id)?.name;
   const parentage =
     parent < 0
       ? h("span", { text: "founder" })
@@ -1365,6 +1427,25 @@ function renderMember(tab) {
         );
   const share = ind.population ? ` (${Math.round((100 * ind.descendants) / ind.population)}%)` : "";
   const tile = (lab, val) => h("div", { class: "tile" }, h("div", { class: "lab", text: lab }), h("div", { class: "val", text: val }));
+  // its reward in every episode it played for its fitness, over its life; runs
+  // that didn't log them just have its latest fitness
+  const ret = ind.returns;
+  const fitness = ret
+    ? h(
+        "div",
+        { class: "tile" },
+        h("div", {
+          class: "lab",
+          text: `fitness · ${ret.episodes} episodes`,
+          title: `every episode it played for its fitness, over ${ret.epochs} ${ret.epochs === 1 ? "epoch" : "epochs"}`,
+        }),
+        h(
+          "div",
+          { class: "stats" },
+          ["mean", "median", "max", "min", "stddev"].flatMap((k) => [h("span", { class: "k", text: k }), h("span", { class: "v", text: fmt(ret[k]) })]),
+        ),
+      )
+    : tile("fitness", fmt(ind.fitness));
 
   const head = h(
     "div",
@@ -1382,7 +1463,7 @@ function renderMember(tab) {
       h("span", { text: ind.species_name }),
       ind.species !== ind.birth_species && h("span", { class: "dim", text: `(born ${state.speciesNames[ind.birth_species] ?? ind.birth_species})` }),
       sep(),
-      h("span", { text: ind.alive ? `alive, born gen ${ind.born}` : `gen ${ind.born}–${ind.last}` }),
+      h("span", { text: `generation ${ind.born}${ind.alive ? ", alive" : ""}` }),
       sep(),
       parentage,
     ),
@@ -1390,74 +1471,41 @@ function renderMember(tab) {
   const tiles = h(
     "div",
     { class: "tiles" },
-    tile("fitness", fmt(ind.fitness)),
-    tile("best fitness", fmt(ind.best)),
-    tile("generations", ind.age),
+    fitness,
+    tile(`epochs alive · ${ind.age}`, ind.last > ind.born ? `${ind.born}–${ind.last}` : `${ind.born}`),
     tile("children", ind.children),
     tile("living descendants", `${ind.descendants}${share}`),
   );
 
-  const depthCtl = h(
-    "span",
-    { class: "scrub" },
-    h("button", { title: "fewer generations", text: "‹", disabled: tab.depth <= 1, onclick: () => setDepth(tab, tab.depth - PEDIGREE_STEP) }),
-    h("span", { class: "pos", text: `${tab.depth} gens back` }),
-    h("button", { title: "more generations", text: "›", disabled: !ind.pedigree.deeper, onclick: () => setDepth(tab, tab.depth + PEDIGREE_STEP) }),
-  );
   const pedBody = h("div", { class: "ped-scroll" });
+  // it keeps its place counted from the right, where the member is, when the panel
+  // changes width (as when the leaderboard comes in)
+  let fromRight = 0;
+  pedBody.addEventListener("scroll", () => (fromRight = pedBody.scrollWidth - pedBody.clientWidth - pedBody.scrollLeft));
+  new ResizeObserver(() => (pedBody.scrollLeft = pedBody.scrollWidth - pedBody.clientWidth - fromRight)).observe(pedBody);
   const pedigree = h(
     "div",
     { class: "card" },
-    h("div", { class: "card-hdr" }, h("span", { class: "title", text: "pedigree" }), h("span", { class: "spacer" }), depthCtl),
+    h("div", { class: "card-hdr" }, h("span", { class: "title", text: "lineage" })),
     pedBody,
-    h("div", { class: "net-foot", text: "fitter parent solid, mate dashed, line of descent highlighted · click one to open it" }),
-  );
-
-  const popSeries = (key, name, color) => ({
-    name,
-    color,
-    points: state.rows.filter((r) => r[key] != null).map((r) => [r.step, r[key]]),
-  });
-  const chart = seriesCard("fitness along the line of descent", [
-    { name: "line of descent", color: "var(--s1)", points: ind.line_fitness },
-    popSeries("max_fitness", "population max", "var(--s2)"),
-    popSeries("mean_fitness", "population mean", "var(--s3)"),
-  ].filter((s) => s.points.length));
-
-  // pinned when first shown, so the cards don't change under the reader as
-  // generations go by
-  if (tab.step == null) tab.step = ind.last;
-  const cards = memberCards(tab);
-
-  const line = h(
-    "div",
-    { class: "card" },
-    h("div", { class: "card-hdr" }, h("span", { class: "title", text: `line of descent · ${ind.line.length - 1} fitter parents back to a founder` })),
     h(
       "div",
-      { class: "board-wrap short" },
-      h(
-        "table",
-        { class: "board" },
-        h("thead", {}, h("tr", {}, h("th", { class: "num", text: "born" }), h("th", { text: "individual" }), h("th", { class: "num", text: "gens" }), h("th", { class: "num", text: "best" }), h("th", { text: "mate" }))),
-        h(
-          "tbody",
-          {},
-          [...ind.line].reverse().map((a) =>
-            h(
-              "tr",
-              { class: a.id === ind.id ? "sel" : null },
-              h("td", { class: "num dim", text: a.born }),
-              h("td", {}, swatch(a.birth_species), a.id === ind.id ? nameEl(a.name) : genomeLink(a.id, a.name)),
-              h("td", { class: "num", text: a.age }),
-              h("td", { class: "num", text: fmt(a.best) }),
-              h("td", {}, a.mate ? genomeLink(a.mate.id, a.mate.name) : h("span", { class: "dim", text: a.parents[0] < 0 ? "founder" : "–" })),
-            ),
-          ),
-        ),
+      { class: "legend ped-legend" },
+      [
+        ["line", "line of descent"],
+        ["primary", "stronger parent"],
+        ["mate", "weaker parent"],
+        ["primary self", "self-cross"],
+      ].map(([cls, text]) =>
+        h("span", { class: "key" }, h("svg", { class: "ped-key", width: 20, height: 8 }, h("path", { class: `edge ${cls}`, d: "M1,4H19" })), text),
       ),
     ),
   );
+
+  // pinned when first shown, so the cards don't change under the reader as
+  // epochs go by
+  if (tab.step == null) tab.step = ind.last;
+  const cards = memberCards(tab);
 
   const kids = ind.child_list;
   const children =
@@ -1480,10 +1528,7 @@ function renderMember(tab) {
       head,
       tiles,
       h("div", { class: "lineage-grid" }, cards.network.el, cards.episode.el),
-      // its family, below what it is and does
-      h("div", { class: "stitle", text: "Lineage" }),
       pedigree,
-      h("div", { class: "lineage-grid" }, chart, line),
       children,
     ].filter(Boolean),
   );
@@ -1535,31 +1580,12 @@ async function memberData(tab, kind) {
   return tab.data[key];
 }
 
-// steps through the generations of the member's life; moves both cards together
-function stepScrub(tab, steps, step) {
-  const last = tab.individual.last;
-  if (steps.length < 2 && step === last) return h("span", { class: "latest", text: `gen ${step}` });
-  const idx = steps.indexOf(step);
-  const go = (s) => {
-    tab.step = s;
-    loadMemberCards(tab);
-  };
-  return h(
-    "span",
-    { class: "scrub" },
-    h("button", { onclick: () => go(steps[idx - 1]), disabled: idx <= 0, title: "previous", text: "‹" }),
-    h("span", { class: "pos", text: `gen ${step}` }),
-    h("button", { onclick: () => go(steps[idx + 1]), disabled: idx >= steps.length - 1, title: "next", text: "›" }),
-    h("button", { class: step === last ? "on" : null, onclick: () => go(last), title: "its latest generation", text: "latest" }),
-  );
-}
-
 async function loadNetwork(tab, card) {
   const net = await memberData(tab, "network");
   if (net === undefined) return;
   card.el.hidden = !net;
   if (!net) return;
-  card.hdr.replaceChildren(h("span", { class: "title", text: "network" }), h("span", { class: "spacer" }), stepScrub(tab, net.steps, net.step));
+  card.hdr.replaceChildren(h("span", { class: "title", text: "network" }));
   requestAnimationFrame(() => {
     const { svg, summary } = networkView(net, card.body.clientWidth - 22);
     card.body.replaceChildren(svg);
@@ -1624,11 +1650,7 @@ async function loadEpisodes(tab, card) {
     eps.episodes.find((e) => e.index === tab.game) ||
     eps.episodes.find((e) => e.seat === 0) ||
     eps.episodes[0];
-  card.hdr.replaceChildren(
-    h("span", { class: "title", text: "episode" }),
-    h("span", { class: "spacer" }),
-    stepScrub(tab, eps.steps, eps.step),
-  );
+  card.hdr.replaceChildren(h("span", { class: "title", text: "sample episode" }));
   // games of several players: say who played which seat, in the order and colours
   // of the picture; the others open on this same game
   const player = (p, seat) =>
@@ -1649,7 +1671,7 @@ async function loadEpisodes(tab, card) {
   if (card.shown === src) return;
   card.shown = src;
   card.body.replaceChildren(h("div", { class: "loading", text: "rendering…" }));
-  const img = h("img", { alt: `episode at gen ${eps.step}` });
+  const img = h("img", { alt: `episode at epoch ${eps.step}` });
   img.addEventListener("load", () => card.shown === src && card.body.replaceChildren(img));
   img.addEventListener("error", () => {
     if (card.shown === src) card.body.replaceChildren(h("div", { class: "media-error", text: "couldn't render this episode" }));
@@ -1657,15 +1679,15 @@ async function loadEpisodes(tab, card) {
   img.src = src;
 }
 
-function setDepth(tab, depth) {
-  tab.depth = Math.max(1, Math.min(48, depth));
-  pollMember(tab);
+// both tournaments picked the same parent, so its offspring is a mutated copy of it
+function selfCross(n) {
+  return n.parents[0] >= 0 && n.parents[0] === n.parents[1];
 }
 
-// ancestors laid out left to right by the generation they were born in, with the
-// line of descent straight across the middle
+// the line of descent from its founder, straight across the middle, and the
+// ancestors near it, laid out left to right by the generation they were born in
 function pedigreeView(ind, width) {
-  const nodes = new Map(ind.pedigree.nodes.map((n) => [n.id, { ...n }]));
+  const nodes = new Map(ind.pedigree.map((n) => [n.id, { ...n }]));
   const kids = new Map();
   for (const n of nodes.values()) {
     for (const p of new Set(n.parents)) {
@@ -1675,7 +1697,8 @@ function pedigreeView(ind, width) {
     }
   }
   const steps = [...new Set([...nodes.values()].map((n) => n.born))].sort((a, b) => a - b);
-  const COL = 96, GAP = 24, PADX = 72, PADY = 28, AXIS = 16;
+  // LANE: from the line to the rows either side of it, room for the line's names
+  const COL = 96, GAP = 24, LANE = 34, PADX = 72, PADY = 28, AXIS = 16;
   const W = Math.max(width, PADX * 2 + (steps.length - 1) * COL);
   const colX = (i) => (steps.length === 1 ? W / 2 : PADX + (i * (W - 2 * PADX)) / (steps.length - 1));
 
@@ -1686,15 +1709,18 @@ function pedigreeView(ind, width) {
       const ys = (kids.get(n.id) || []).map((k) => k.y);
       n.bary = ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : 0;
     }
+    // the line keeps its row in every column; the rest are split evenly above and
+    // below it, in the order of their children's heights
     col.sort((a, b) => a.bary - b.bary || a.id - b.id);
-    const anchor = col.findIndex((n) => n.on_line);
-    const mid = col.reduce((a, n) => a + n.bary, 0) / col.length;
-    const top = anchor >= 0 ? -anchor * GAP : mid - ((col.length - 1) * GAP) / 2;
-    col.forEach((n, j) => {
+    const rest = col.filter((n) => !n.on_line);
+    const above = rest.slice(0, rest.length >> 1), below = rest.slice(rest.length >> 1);
+    for (const n of col) if (n.on_line) n.y = 0;
+    above.forEach((n, j) => (n.y = -LANE - (above.length - 1 - j) * GAP));
+    below.forEach((n, j) => (n.y = LANE + j * GAP));
+    for (const n of col) {
       n.x = colX(i);
-      n.y = top + j * GAP;
       n.col = i;
-    });
+    }
   }
   const ys = [...nodes.values()].map((n) => n.y);
   const lo = Math.min(...ys), hi = Math.max(...ys);
@@ -1702,7 +1728,8 @@ function pedigreeView(ind, width) {
   for (const n of nodes.values()) n.y += PADY - lo;
 
   const svg = h("svg", { class: "ped", viewBox: `0 0 ${W} ${H}`, width: W, height: H });
-  steps.forEach((st, i) => svg.append(h("text", { class: "gen", x: colX(i), y: H - 4, "text-anchor": "middle", text: `gen ${st}` })));
+  steps.forEach((st, i) => svg.append(h("text", { class: "gen", x: colX(i), y: H - 4, "text-anchor": "middle", text: st })));
+  svg.append(h("text", { class: "gen axis-name", x: W - 6, y: H - 4, "text-anchor": "end", text: "generation" }));
 
   const edgeEls = [];
   for (const n of nodes.values()) {
@@ -1712,7 +1739,9 @@ function pedigreeView(ind, width) {
       const fitter = pid === n.parents[0];
       const cls = fitter && p.on_line && n.on_line ? "line" : fitter ? "primary" : "mate";
       const mx = (p.x + n.x) / 2;
-      const el = h("path", { class: `edge ${cls}`, d: `M${p.x},${p.y} C${mx},${p.y} ${mx},${n.y} ${n.x},${n.y}` });
+      // crossed with itself: its one parent's edge in green
+      const self = selfCross(n) ? " self" : "";
+      const el = h("path", { class: `edge ${cls}${self}`, d: `M${p.x},${p.y} C${mx},${p.y} ${mx},${n.y} ${n.x},${n.y}` });
       el.dataset.from = pid;
       el.dataset.to = n.id;
       edgeEls.push(el);
@@ -1734,8 +1763,9 @@ function pedigreeView(ind, width) {
         ev.clientX,
         ev.clientY,
         h("div", { class: "head", text: n.name }),
-        h("div", { class: "row" }, `#${n.id} · ${n.species_name} · gen ${n.born}${n.last > n.born ? `–${n.last}` : ""}`),
+        h("div", { class: "row" }, `#${n.id} · ${n.species_name} · generation ${n.born} · ${n.last > n.born ? `epochs ${n.born}–${n.last}` : `epoch ${n.born}`}`),
         h("div", { class: "row" }, "best ", h("b", { text: fmt(n.best) }), ` · ${n.children} children`),
+        selfCross(n) && h("div", { class: "row" }, "self-cross"),
       );
     });
     node.addEventListener("pointerleave", () => {

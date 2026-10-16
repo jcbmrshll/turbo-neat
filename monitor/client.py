@@ -5,6 +5,7 @@
     monitor.log(step, {"max_fitness": 3.2, "episode": Episode("boids", boids=states)})
     monitor.log(step, {"members": Members(ids, parents, species, fitness)})
     monitor.log(step, {"networks": Networks(ids, from_nodes, to_nodes, weights, ...)})
+    monitor.log(step, {"returns": Returns(ids, returns)})
     monitor.log(step, {"episodes": Episodes(Episode("boids", boids=...), players)})
     monitor.finish()
 
@@ -149,6 +150,28 @@ class Networks:
         return buf.getvalue()
 
 
+class Returns:
+    """Every member's reward in each episode it played for its fitness in one
+    generation: genome ids, and the rewards, shape (episodes, members), for the
+    member view's episode stats.
+
+    Like Members, the arrays are copied off the device when logged."""
+
+    def __init__(self, ids: Any, returns: Any):
+        self.ids = ids
+        self.returns = returns
+
+    def to_bytes(self) -> bytes:
+        buf = io.BytesIO()
+        np.savez_compressed(
+            buf,
+            ids=np.asarray(self.ids, dtype=np.int32),
+            # one row per member, so the server reads a member's in one slice
+            returns=np.asarray(self.returns, dtype=np.float32).T,
+        )
+        return buf.getvalue()
+
+
 def to_number(value: Any) -> Optional[float]:
     """A plain float for scalars (python, numpy or jax), None for anything else."""
     if isinstance(value, bool):
@@ -245,6 +268,14 @@ class Monitor:
             if isinstance(value, Networks):
                 self._request(
                     f"/api/runs/{self.run_id}/networks?step={step}",
+                    value.to_bytes(),
+                    content_type="application/x-npz",
+                    timeout=60,
+                )
+                continue
+            if isinstance(value, Returns):
+                self._request(
+                    f"/api/runs/{self.run_id}/returns?step={step}",
                     value.to_bytes(),
                     content_type="application/x-npz",
                     timeout=60,

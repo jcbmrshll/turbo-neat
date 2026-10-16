@@ -62,10 +62,6 @@ class GenomeConfig:
     init_mode: str = "partial"
 
     @property
-    def activation_map(self) -> Dict:
-        return {i: f.__name__ for i, f in enumerate(self.activation_fns)}
-
-    @property
     def num_activation_functions(self) -> int:
         return len(self.activation_fns)
 

@@ -24,13 +24,11 @@ TestFn = Callable[..., Tuple[jax.Array, Any]]
 @dataclass(frozen=True)
 class TestResult:
     """What a test of the population found: metrics to log, by the names the test
-    gives them, and optionally an episode for the monitor to show, the index in the
-    population of the genome whose network it shows, and the genome ids playing the
-    episode, one per seat, for it to name."""
+    gives them, and optionally an episode for the monitor to show, and the genome ids
+    playing the episode, one per seat, for it to name."""
 
     metrics: Dict[str, jax.Array]
     episode: Any = None
-    shown: Optional[jax.Array] = None
     players: Optional[jax.Array] = None
 
 
@@ -38,11 +36,11 @@ class TestResult:
 PopulationTestFn = Callable[..., TestResult]
 
 
-def fittest(genome: Genome, k: int) -> Tuple[Genome, jax.Array]:
+def fittest(genome: Genome, k: int) -> Genome:
     """The k genomes of a population with the highest training fitness, fittest
-    first, and their indices in it."""
+    first."""
     _, idx = jax.lax.top_k(genome.fitness, k)
-    return jax.tree.map(lambda x: x[idx], genome), idx
+    return jax.tree.map(lambda x: x[idx], genome)
 
 
 def top_k_test(
@@ -54,14 +52,14 @@ def top_k_test(
     **kwargs,
 ) -> TestResult:
     """Tests the k fittest genomes on the same episodes, logging the best and the
-    mean of their scores as max_<name> and mean_<name>, and shows the best one."""
-    tested, idx = fittest(genome, k)
+    mean of their scores as max_<name> and mean_<name>, and shows the best one's
+    episode."""
+    tested = fittest(genome, k)
     scores, data = jax.vmap(lambda g: test_fn(rng=rng, genome=g, **kwargs))(tested)
     best = jnp.argmax(scores)
     return TestResult(
         metrics={f"max_{name}": scores.max(), f"mean_{name}": scores.mean()},
         episode=jax.tree.map(lambda x: x[best], data),
-        shown=idx[best],
         players=tested.genome_id[best][None],
     )
 
@@ -76,13 +74,12 @@ def field_test(
 ) -> TestResult:
     """Tests the size fittest genomes against each other, fittest in the first seat,
     logging the best and the mean of their scores as max_<name> and mean_<name>,
-    with the test's episode, and shows the best one's network."""
-    field, idx = fittest(genome, size)
+    with the test's episode."""
+    field = fittest(genome, size)
     scores, episode = test_fn(rng=rng, genome=field, **kwargs)
     return TestResult(
         metrics={f"max_{name}": scores.max(), f"mean_{name}": scores.mean()},
         episode=episode,
-        shown=idx[jnp.argmax(scores)],
         players=field.genome_id,
     )
 

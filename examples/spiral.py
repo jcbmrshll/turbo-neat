@@ -218,6 +218,8 @@ def main():
         # every 10th generation's 10 fittest, on the same fresh data
         test_fn=make_top_k_test(make_test_fn(generate)),
         monitor=Monitor(args.monitor, project="spiral") if args.monitor else None,
+        # each batch is a random draw of the data, so one would be a noisy fitness
+        eval_batches=2,
     )
     bneat.run(seed=args.seed, num_generations=args.generations, episode_fn=episode_fn)
 

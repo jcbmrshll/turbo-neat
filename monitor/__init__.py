@@ -5,6 +5,7 @@ from monitor.client import (
     Members,
     Monitor,
     Networks,
+    Returns,
 )
 from monitor.media import Video
 
@@ -15,5 +16,6 @@ __all__ = [
     "Members",
     "Monitor",
     "Networks",
+    "Returns",
     "Video",
 ]

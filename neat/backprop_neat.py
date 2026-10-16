@@ -59,13 +59,16 @@ def evaluate_and_train(
     num_steps: int,
     max_grad_norm: Optional[float],
     activation_selector: ActivationSelector,
-) -> Tuple[Population, Optional[Recording]]:
+    eval_batches: int,
+) -> Tuple[Population, Optional[Recording], jax.Array]:
     """Train the weights and biases of every genome by gradient descent, then score
-    the trained genomes on a fresh batch.
+    the trained genomes on eval_batches fresh batches: fitness is their mean.
 
     The trained weights are kept (and inherited), so the population's weights improve
     across generations as well as within them. Also returns what each genome was
-    scored on, if backprop_fn records it."""
+    scored on in the first batch, if backprop_fn records it, and each batch's
+    fitness, (batches, genomes), as the episodes each genome played (see
+    neat.neat.evaluate)."""
     population = replace(
         population, batched_genome=prepare_for_inference(population.batched_genome)
     )
@@ -81,14 +84,19 @@ def evaluate_and_train(
         ), None
 
     genome, _ = jax.lax.scan(train_step, genome, jax.random.split(train_rng, num_steps))
-    fitnesses, _, *recorded = backprop_fn(
-        rng=eval_rng, genome=genome, activation_selector=activation_selector
+    # one batch keeps the rng it always had
+    eval_rngs = (
+        jax.random.split(eval_rng, eval_batches) if eval_batches > 1 else [eval_rng]
     )
-    fitnesses = jnp.where(jnp.isfinite(fitnesses), fitnesses, DIVERGED_FITNESS)
-    recording = recorded[0] if recorded else None
-    return replace(
-        population, batched_genome=replace(genome, fitness=fitnesses)
-    ), recording
+    scored = [
+        backprop_fn(rng=rng, genome=genome, activation_selector=activation_selector)
+        for rng in eval_rngs
+    ]
+    returns = jnp.stack([fitnesses for fitnesses, *_ in scored])
+    returns = jnp.where(jnp.isfinite(returns), returns, DIVERGED_FITNESS)
+    recording = scored[0][2] if len(scored[0]) > 2 else None
+    genome = replace(genome, fitness=returns.mean(axis=0))
+    return replace(population, batched_genome=genome), recording, returns
 
 
 class BackpropNEAT(NEAT):
@@ -101,7 +109,12 @@ class BackpropNEAT(NEAT):
         test_fn: Optional[PopulationTestFn] = None,
         test_every: int = 10,
         monitor: Optional[Monitor] = None,
+        eval_batches: int = 1,
     ):
+        """eval_batches: fresh batches each genome is scored on after training, for
+        a less noisy fitness."""
+        if eval_batches < 1:
+            raise ValueError("eval_batches must be at least 1")
         self.config = config
         self.activation_selector = config.genome_config.activation_selector
         self.monitor = monitor
@@ -129,6 +142,7 @@ class BackpropNEAT(NEAT):
                 num_steps=config.mutation_config.backprop_steps,
                 max_grad_norm=config.mutation_config.max_grad_norm,
                 activation_selector=self.activation_selector,
+                eval_batches=eval_batches,
             )
         )
         self.evolve = jax.jit(partial(evolve_one_generation, config=config))
