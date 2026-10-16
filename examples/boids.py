@@ -19,6 +19,8 @@ from neat.species import make_improvement_stagnation_fn
 from neat.testing import make_top_k_test
 
 NUM_STEPS = 100
+# every fish runs the same network; the monitor keeps what this many of them saw
+OBSERVED_FISH = 3
 # episodes each genome plays for its fitness
 NUM_EPISODES = 8
 
@@ -92,9 +94,11 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
 
 
 def episode_fn(state):
-    """An episode as raw boid states (x, y, theta), for the monitor to draw; also
-    packs the members' recorded episodes at once, with a leading episode axis."""
-    return Episode("boids", boids=state.state)
+    """An episode as raw boid states (x, y, theta), for the monitor to draw, and
+    what the first few fish saw, for it to show the network's activations as any of
+    them swims; also packs the members' recorded episodes at once, with a leading
+    episode axis."""
+    return Episode("boids", boids=state.state, obs=state.obs[..., :OBSERVED_FISH, :])
 
 
 def main():

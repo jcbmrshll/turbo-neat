@@ -266,11 +266,11 @@ code {
 .scrub .pos { min-width: 70px; text-align: center; font-variant-numeric: tabular-nums; }
 .epoch-bar { gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--edge); }
 /* a plain line with a knob, no filled track */
-.epoch-bar input[type="range"] { flex: 1; appearance: none; -webkit-appearance: none; background: transparent; border: none; padding: 0; height: 16px; margin: 0 4px; cursor: pointer; }
-.epoch-bar input[type="range"]::-webkit-slider-runnable-track { height: 2px; background: var(--edge); }
-.epoch-bar input[type="range"]::-moz-range-track { height: 2px; background: var(--edge); }
-.epoch-bar input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -5px; border-radius: 50%; background: var(--panel); border: 1.5px solid var(--mid); }
-.epoch-bar input[type="range"]::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--panel); border: 1.5px solid var(--mid); }
+:is(.epoch-bar, .player) input[type="range"] { flex: 1; appearance: none; -webkit-appearance: none; background: transparent; border: none; padding: 0; height: 16px; margin: 0 4px; cursor: pointer; }
+:is(.epoch-bar, .player) input[type="range"]::-webkit-slider-runnable-track { height: 2px; background: var(--edge); }
+:is(.epoch-bar, .player) input[type="range"]::-moz-range-track { height: 2px; background: var(--edge); }
+:is(.epoch-bar, .player) input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -5px; border-radius: 50%; background: var(--panel); border: 1.5px solid var(--mid); }
+:is(.epoch-bar, .player) input[type="range"]::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--panel); border: 1.5px solid var(--mid); }
 .epoch-bar.pinned input[type="range"]::-webkit-slider-thumb { border-color: #d8392b; }
 .epoch-bar.pinned input[type="range"]::-moz-range-thumb { border-color: #d8392b; }
 .epoch-bar .epoch-box { width: 56px; text-align: right; font-variant-numeric: tabular-nums; -moz-appearance: textfield; }
@@ -327,7 +327,24 @@ code {
 .net .node.output { fill: var(--accent); }
 .net .node.hidden { fill: var(--well); stroke: var(--fg); stroke-width: 1.25; }
 .net .lab { font: 10px var(--mono); fill: var(--mid); }
-.net-foot { font: 10.5px var(--mono); color: var(--dim); padding: 0 11px 8px; }
+.net .lab .val { fill: var(--fg); font-variant-numeric: tabular-nums; white-space: pre; }
+/* lit up by an episode: filled by output, ringed by kind */
+.net .node.lit { stroke-width: 1.5; }
+.net .node.lit.input, .net .node.lit.hidden { stroke: var(--fg); }
+.net .node.lit.output { stroke: var(--accent); stroke-width: 2; }
+.net-foot { font: 10.5px var(--mono); color: var(--dim); padding: 0 11px 8px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.act-key { display: inline-flex; align-items: center; gap: 5px; }
+.act-key i { width: 22px; height: 8px; border: 1px solid var(--edge-soft); }
+.act-key i:first-of-type { background: linear-gradient(90deg, var(--s2), var(--well)); }
+.act-key i:last-of-type { background: linear-gradient(90deg, var(--well), var(--s1)); }
+
+/* episodes, drawn in the browser */
+.player { width: 100%; display: flex; flex-direction: column; gap: 6px; }
+.player canvas { width: 100%; align-self: center; display: block; border: 1px solid var(--edge-soft); cursor: pointer; }
+.player-controls button { min-width: 30px; }
+.player-controls .play { min-width: 34px; }
+/* a test's episode and the network playing it, side by side when there's room */
+.ep-grid { width: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 10px; align-items: start; }
 
 /* tabs */
 

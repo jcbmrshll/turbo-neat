@@ -3,6 +3,11 @@
 // No framework; every view is plain DOM built with h(), and labels that come
 // from a run (metric names, config values) only ever go in as text.
 
+import { h } from "./dom.js";
+import { NdArray, loadArrays, episodePlayer, traceNetwork } from "./episodes.js";
+import { BLUE, ORANGE, WELL } from "./palette.js";
+import { RENDERERS } from "./renderers.js";
+
 const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6"].map((v) => `var(${v})`);
 const POLL_MS = 2000;
 const RUNS_POLL_MS = 5000;
@@ -55,24 +60,6 @@ const state = {
 };
 
 // ---------------------------------------------------------------- helpers
-
-function h(tag, attrs = {}, ...children) {
-  const svg = ["svg", "path", "line", "circle", "text", "g", "rect"].includes(tag);
-  const el = svg
-    ? document.createElementNS("http://www.w3.org/2000/svg", tag)
-    : document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (k === "text") el.textContent = v;
-    else el.setAttribute(k, v === true ? "" : v);
-  }
-  for (const c of children.flat()) {
-    if (c == null || c === false) continue;
-    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
-  }
-  return el;
-}
 
 async function api(path) {
   const res = await fetch(path);
@@ -839,13 +826,18 @@ function updateMediaCard(key, entries, card) {
     h("span", { class: "latest", text: `epoch ${entry.step}` }),
   );
   card.who.replaceChildren(...playerLine(key, entry));
-  // swapping the element restarts a gif, so only do it when the entry changes
-  const id = entry.file || `error-${entry.step}`;
+  // swapping the element restarts a gif or a player, so only do it when the entry
+  // changes
+  const id = entry.file || entry.episode || `error-${entry.step}`;
   if (card.shown === id) return;
   card.shown = id;
   card.foot.replaceChildren();
   if (entry.error) {
     card.body.replaceChildren(h("div", { class: "media-error", text: `couldn't render: ${entry.error}` }));
+    return;
+  }
+  if (entry.episode) {
+    showEpisode(card, entry);
     return;
   }
   const src = `/media/${state.runId}/${encodeURIComponent(entry.file)}`;
@@ -868,6 +860,79 @@ function updateMediaCard(key, entries, card) {
   } else {
     card.body.replaceChildren(h("img", { src, alt: `${key} at epoch ${entry.step}` }));
   }
+}
+
+// a test's episode, played beside the network of the agent picked in it (the
+// first one with observations, or the one clicked), lit up as it plays
+async function showEpisode(card, entry) {
+  const render = RENDERERS[entry.env];
+  let arrays;
+  try {
+    if (!render) throw new Error(`no renderer for ${entry.env}`);
+    arrays = await loadArrays(`/api/runs/${state.runId}/episodes/${encodeURIComponent(entry.episode)}`);
+  } catch (e) {
+    if (card.shown === entry.episode) card.body.replaceChildren(h("div", { class: "media-error", text: `couldn't show this episode: ${e.message}` }));
+    return;
+  }
+  if (card.shown !== entry.episode) return;
+  const rows = obsRows(arrays, entry.players || []).filter((r) => r.id != null);
+  const player = episodePlayer(render(arrays), { seat: rows[0]?.seat ?? null });
+  if (!rows.length) {
+    card.body.replaceChildren(player.el);
+    return;
+  }
+  const net = { body: h("div", { class: "ep-net" }), foot: h("div") };
+  card.body.replaceChildren(h("div", { class: "ep-grid" }, player.el, h("div", {}, net.body, net.foot)));
+  const pick = (seat) => {
+    const row = rows.find((r) => r.seat === seat);
+    if (!row) return false;
+    player.setSeat(seat);
+    fetchNetwork(row.id, entry.step).then((network) => {
+      if (card.shown !== entry.episode || player.seat !== seat) return;
+      if (network) drawNetwork(net, network, { arrays, row, player });
+      else net.body.replaceChildren(h("div", { class: "media-error", text: "no network logged for it" }));
+    });
+    return true;
+  };
+  player.onSeat = pick;
+  requestAnimationFrame(() => pick(rows[0].seat));
+}
+
+// a genome's network in an epoch, kept once fetched; null if it wasn't logged
+async function fetchNetwork(id, step) {
+  const key = `${state.runId}/${id}@${step}`;
+  if (!(key in networkCache)) {
+    try {
+      networkCache[key] = await api(`/api/runs/${state.runId}/individuals/${id}/network?step=${step}`);
+    } catch {
+      return null;
+    }
+  }
+  return networkCache[key];
+}
+const networkCache = {};
+
+// the agents of an episode whose observations it recorded, so whose networks can
+// be rerun: one per row of arrays.obs, {row, seat, id}, in the seat
+// arrays.obs_seats gives it (its row by default), played by the genome in that
+// seat, or by the one genome playing every row (a flock), from players (in seat
+// order, ids or {id})
+function obsRows(arrays, players) {
+  if (!arrays.obs) return [];
+  const ids = players.map((p) => (typeof p === "object" ? p.id : p));
+  const count = arrays.obs.shape.length > 2 ? arrays.obs.shape[1] : 1;
+  const seats = arrays.obs_seats ? [...arrays.obs_seats.data] : [...Array(count).keys()];
+  return seats.map((seat, row) => ({ row, seat, id: ids.length === count ? ids[row] : ids.length === 1 ? ids[0] : null }));
+}
+
+// the episode's observations in one row, (frames, inputs)
+function obsOf(arrays, row) {
+  const obs = arrays.obs;
+  if (obs.shape.length === 2) return obs;
+  const [frames, , inputs] = obs.shape;
+  const data = new Float32Array(frames * inputs);
+  for (let t = 0; t < frames; t++) data.set(obs.at(t).at(row).data, t * inputs);
+  return new NdArray(data, [frames, inputs]);
 }
 
 // the episode shown is of the genomes the run's test picked; name them, and in a
@@ -904,7 +969,12 @@ function playerLine(key, entry) {
 
 // ---------------------------------------------------------------- network
 
-function networkView(net, width) {
+// net drawn to width; with a trace (episodes.js traceNetwork), also show(frame),
+// which lights it up with what it did at that frame: each node coloured by the
+// sign of its output, as strong as the output is against its largest over the
+// episode, each edge likewise by what it carried (its source's output times its
+// weight), and the inputs' and outputs' values beside their labels
+function networkView(net, width, trace = null) {
   const nodes = new Map(net.nodes.map((n) => [n.id, { ...n, depth: n.kind === "input" ? 0 : 1 }]));
   // longest path from the inputs; bounded so a cycle can't hang the page
   for (let pass = 0; pass < nodes.size; pass++) {
@@ -931,8 +1001,11 @@ function networkView(net, width) {
   const rows = Math.max(...columns.map((c) => (c ? c.length : 0)), 3);
   // deep, narrow networks still get room to fan out
   const H = Math.max(rows * ROW + 16, 240);
-  const labelW = (list) => Math.max(0, ...list.map((n) => (n.label || "").length)) * 6.2 + 12;
-  const padL = Math.min(160, labelW(inputs)), padR = Math.min(160, labelW(outputs));
+  // room for a value (" -0.42") after each label, when there are values
+  const valueChars = trace ? 6 : 0;
+  const labelW = (list) => (Math.max(0, ...list.map((n) => (n.label || "").length)) + valueChars) * 6.2 + 12;
+  const padL = Math.min(160 + valueChars * 6.2, labelW(inputs));
+  const padR = Math.min(160 + valueChars * 6.2, labelW(outputs));
   const W = Math.max(width, padL + padR + 120);
   const colX = (d) => padL + (d / outDepth) * (W - padL - padR);
 
@@ -974,11 +1047,21 @@ function networkView(net, width) {
     });
     el.dataset.from = e.from;
     el.dataset.to = e.to;
+    el.edge = e;
     edgeEls.push(el);
     svg.append(el);
   }
+  // each node's column in the trace, and its range over the episode
+  const col = new Map(net.nodes.map((n, i) => [n.id, i]));
+  const range = trace && traceRanges(trace);
+  let frame = 0;
+  const valueAt = (id) => trace.values[frame * trace.nodes + col.get(id)];
+  const valueEls = [];
+  const nodeEls = [];
   for (const n of nodes.values()) {
-    const node = h("circle", { class: `node ${n.kind}`, cx: n.x, cy: n.y, r: n.kind === "hidden" ? 4.5 : 5 });
+    const node = h("circle", { class: `node ${n.kind}${trace ? " lit" : ""}`, cx: n.x, cy: n.y, r: n.kind === "hidden" ? 4.5 : 5 });
+    node.id_ = n.id;
+    nodeEls.push(node);
     node.addEventListener("pointerenter", (ev) => {
       for (const el of edgeEls) {
         el.classList.toggle("dim", el.dataset.from != n.id && el.dataset.to != n.id);
@@ -989,6 +1072,8 @@ function networkView(net, width) {
         h("div", { class: "head", text: n.label ? `${n.kind} · ${n.label}` : `${n.kind} · node ${n.id}` }),
         h("div", { class: "row" }, h("b", { text: n.activation })),
         n.kind !== "input" && h("div", { class: "row" }, "bias ", h("b", { text: fmt(n.bias) })),
+        trace && h("div", { class: "row" }, "output ", h("b", { text: fmt(valueAt(n.id)) })),
+        trace && h("div", { class: "row" }, "over the episode ", h("b", { text: `${fmt(range.lo[col.get(n.id)])} to ${fmt(range.hi[col.get(n.id)])}` })),
       );
     });
     node.addEventListener("pointerleave", () => {
@@ -996,14 +1081,70 @@ function networkView(net, width) {
       hideTip();
     });
     svg.append(node);
-    if (n.kind === "input") {
-      svg.append(h("text", { class: "lab", x: n.x - 9, y: n.y + 3.5, "text-anchor": "end", text: n.label }));
-    } else if (n.kind === "output") {
-      svg.append(h("text", { class: "lab", x: n.x + 9, y: n.y + 3.5, text: n.label }));
+    if (n.kind === "input" || n.kind === "output") {
+      const value = trace ? h("tspan", { class: "val" }) : null;
+      const input = n.kind === "input";
+      // inputs' labels end at their node, and outputs' start at theirs, so the
+      // values go on the side by the node
+      const parts = input ? [n.label, value && " ", value] : [value, value && " ", n.label];
+      svg.append(h("text", { class: "lab", x: n.x + (input ? -9 : 9), y: n.y + 3.5, "text-anchor": input ? "end" : null }, ...parts));
+      if (value) valueEls.push([value, n.id]);
     }
   }
   const summary = `${hidden.length} hidden · ${net.edges.length} connections`;
-  return { svg, summary };
+  if (!trace) return { svg, summary, show: null };
+
+  const show = (t) => {
+    frame = Math.min(t, trace.frames - 1);
+    for (const node of nodeEls) {
+      const i = col.get(node.id_);
+      node.style.fill = activityColor(valueAt(node.id_), range.lo[i], range.hi[i]);
+    }
+    for (const el of edgeEls) {
+      const e = el.edge;
+      const carried = valueAt(e.from) * e.weight;
+      const i = col.get(e.from);
+      // an edge carries the most at its source's extreme
+      const most = Math.max(Math.abs(range.lo[i]), Math.abs(range.hi[i])) * Math.abs(e.weight);
+      el.setAttribute("stroke", carried >= 0 ? "var(--s1)" : "var(--s2)");
+      el.style.opacity = most > 0 ? (0.06 + (0.84 * Math.abs(carried)) / most).toFixed(3) : 0.06;
+    }
+    for (const [el, id] of valueEls) el.textContent = fmtValue(valueAt(id));
+  };
+  return { svg, summary, show };
+}
+
+// each node's least and most output over a trace, and the most each edge carried
+function traceRanges(trace) {
+  const lo = new Float32Array(trace.nodes).fill(Infinity), hi = new Float32Array(trace.nodes).fill(-Infinity);
+  for (let t = 0; t < trace.frames; t++) {
+    for (let i = 0; i < trace.nodes; i++) {
+      const v = trace.values[t * trace.nodes + i];
+      if (v < lo[i]) lo[i] = v;
+      if (v > hi[i]) hi[i] = v;
+    }
+  }
+  return { lo, hi };
+}
+
+// a node's colour for an output v, of outputs from lo to hi: blue for positive,
+// orange for negative, fading to the background at zero
+const RGB = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+const [POS_RGB, NEG_RGB, ZERO_RGB] = [BLUE, ORANGE, WELL].map(RGB);
+function activityColor(v, lo, hi) {
+  const most = Math.max(Math.abs(lo), Math.abs(hi));
+  const u = most > 0 && Number.isFinite(v) ? Math.max(-1, Math.min(1, v / most)) : 0;
+  const to = u >= 0 ? POS_RGB : NEG_RGB;
+  const mix = ZERO_RGB.map((z, k) => Math.round(z + (to[k] - z) * Math.abs(u)));
+  return `rgb(${mix})`;
+}
+
+// a value in a fixed width, so labels beside it hold still as it changes
+function fmtValue(v) {
+  if (!Number.isFinite(v)) return "  –  ";
+  const a = Math.abs(v);
+  const text = a >= 999.5 ? fmt(v) : a >= 99.95 ? v.toFixed(0) : a >= 9.995 ? v.toFixed(1) : v.toFixed(2);
+  return (v < 0 ? "" : "+") + text;
 }
 
 // ---------------------------------------------------------------- species map
@@ -1585,17 +1726,38 @@ async function loadNetwork(tab, card) {
   if (net === undefined) return;
   card.el.hidden = !net;
   if (!net) return;
+  card.net = net;
   card.hdr.replaceChildren(h("span", { class: "title", text: "network" }));
-  requestAnimationFrame(() => {
-    const { svg, summary } = networkView(net, card.body.clientWidth - 22);
-    card.body.replaceChildren(svg);
-    card.foot.replaceChildren(h("div", { class: "net-foot", text: summary }));
-  });
+  requestAnimationFrame(() => linkMember(tab));
+}
+
+// the member's network, lit up by what it did at each frame of its episode when
+// the episode recorded its observations
+function linkMember(tab) {
+  const { network, episode } = tab.cards;
+  if (!network.net) return;
+  const player = episode.player;
+  const row = player && episode.rows.find((r) => r.id === tab.id && r.seat === player.seat);
+  drawNetwork(network, network.net, row ? { arrays: episode.arrays, row, player } : null);
+}
+
+// net drawn into a card, and with `activity` ({arrays, row, player}), lit up by
+// what it did with the episode's observations in that row, at the player's frame
+function drawNetwork(card, net, activity = null) {
+  const trace = activity && traceNetwork(net, obsOf(activity.arrays, activity.row.row));
+  const { svg, summary, show } = networkView(net, card.body.clientWidth - 22, trace?.error ? null : trace);
+  card.body.replaceChildren(svg);
+  const legend = show && h("span", { class: "act-key" }, "−", h("i"), "activation", h("i"), "+");
+  card.foot.replaceChildren(h("div", { class: "net-foot" }, h("span", { text: summary }), legend, trace?.error && h("span", { class: "dim", text: trace.error })));
+  if (activity) {
+    activity.player.onFrame = show || null;
+    show?.(activity.player.frame);
+  }
 }
 
 // which seat each player of a game had, in the renderers' colours: the sides of a
 // two-player game, or a race's places on the grid, each car a parody of a 2026 team
-// in its livery (monitor/renderers.py LIVERIES), with an edge so the white cars show
+// in its livery (f1tenth.js LIVERIES), with an edge so the white cars show
 const LIVERIES = [
   ["Mclando", "#ff8000"],
   ["Vercedes", "#b9bec4"],
@@ -1666,17 +1828,40 @@ async function loadEpisodes(tab, card) {
     );
   const players = ep.players.length > 1 && matchup(ep.players.map(player));
   card.foot.replaceChildren(...[players].filter(Boolean));
-  // swapping the image restarts the gif, so only when the episode changes
+  // a new player only when the episode changes, so one that's playing carries on
   const src = `/api/runs/${state.runId}/member_episodes/${eps.step}/${ep.index}`;
   if (card.shown === src) return;
   card.shown = src;
-  card.body.replaceChildren(h("div", { class: "loading", text: "rendering…" }));
-  const img = h("img", { alt: `episode at epoch ${eps.step}` });
-  img.addEventListener("load", () => card.shown === src && card.body.replaceChildren(img));
-  img.addEventListener("error", () => {
-    if (card.shown === src) card.body.replaceChildren(h("div", { class: "media-error", text: "couldn't render this episode" }));
-  });
-  img.src = src;
+  card.player = null;
+  card.body.replaceChildren(h("div", { class: "loading", text: "loading…" }));
+  const render = RENDERERS[eps.env];
+  let arrays;
+  try {
+    if (!render) throw new Error(`no renderer for ${eps.env}`);
+    arrays = await loadArrays(src);
+  } catch (e) {
+    if (card.shown === src) card.body.replaceChildren(h("div", { class: "media-error", text: `couldn't show this episode: ${e.message}` }));
+    return;
+  }
+  if (card.shown !== src) return;
+  card.arrays = arrays;
+  card.rows = obsRows(arrays, ep.players);
+  // the member's own agent, the first of them if it plays several (a flock)
+  const own = card.rows.find((r) => r.id === tab.id);
+  card.player = episodePlayer(render(arrays), { seat: own ? own.seat : ep.seat });
+  card.player.onSeat = (seat) => {
+    const row = card.rows.find((r) => r.seat === seat);
+    if (row?.id === tab.id) {
+      card.player.setSeat(seat);
+      linkMember(tab);
+    } else if (row?.id != null) {
+      // another member's agent: its own tab, on this same game
+      openTab(row.id, { at: { step: eps.step, game: ep.index } });
+    }
+    return row?.id != null;
+  };
+  card.body.replaceChildren(card.player.el);
+  linkMember(tab);
 }
 
 // both tournaments picked the same parent, so its offspring is a mutated copy of it

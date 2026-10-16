@@ -11,21 +11,22 @@ Everything lives on disk under the run directory, one folder per run:
     <dir>/<run id>/members.jsonl  every member of each generation, one line per
                                   generation (see monitor.lineage)
     <dir>/<run id>/media/         the media files themselves
-    <dir>/<run id>/episodes/      raw episode data (.npz), rendered into media/
+    <dir>/<run id>/episodes/      the tests' episodes, as raw arrays (.npz)
     <dir>/<run id>/networks/      every member's network, one .npz per generation
                                   (see monitor.networks)
     <dir>/<run id>/returns/       every member's reward in each episode it played
                                   for its fitness, one .npz per generation
     <dir>/<run id>/member_episodes/  the episodes members played for their fitness,
-                                  <step>-<env>.npz per generation, rendered into
-                                  rendered/ the first time one is asked for
+                                  <step>-<env>.npz per generation
 
-Runs send episodes as raw arrays; the server renders them (monitor.renderers)
-on a background thread, so neither the training run nor the dashboard draws them.
-Members' episodes are far too many to render them all, so they're drawn on demand.
+Runs send episodes as raw arrays, and the dashboard gets them as they are (see
+pack_arrays) and draws them itself (static/renderers.js), so it can play, pause
+and scrub them, and show what a network was doing at each frame.
 """
 
 import argparse
+import gzip
+import io
 import json
 import mimetypes
 import os
@@ -33,8 +34,6 @@ import re
 import secrets
 import threading
 import time
-import traceback
-from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,9 +44,7 @@ import numpy as np
 
 from monitor.aliases import alias
 from monitor.lineage import Lineage
-from monitor.media import encode_media
 from monitor.networks import describe_network, unpack_network
-from monitor.renderers import RENDERERS
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -86,8 +83,6 @@ class RunStore:
         self.lineages: Dict[str, Lineage] = {}
         # run id -> its latest mean fitness, for runs whose meta doesn't keep it
         self.mean_fitness: Dict[str, Optional[float]] = {}
-        # members' episodes render one at a time, like the tests'
-        self.render_lock = threading.Lock()
 
     def _dir(self, run_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
@@ -364,40 +359,29 @@ class RunStore:
             "episodes": episodes,
         }
 
-    def member_episode_media(self, run_id: str, step: int, index: int) -> Path:
-        """One of a generation's member episodes, rendered (the first time it's
-        asked for) like the tests'."""
-        run_dir = self._dir(run_id)
-        source = self._member_episode_files(run_dir)[step]
-        rendered = run_dir / "member_episodes" / "rendered"
-        cached = list(rendered.glob(f"{step}-{index}.*"))
-        if cached:
-            return cached[0]
-        with self.render_lock:
-            cached = list(rendered.glob(f"{step}-{index}.*"))
-            if cached:
-                return cached[0]
-            with np.load(source, allow_pickle=False) as npz:
-                if not 0 <= index < len(npz["players"]):
-                    raise KeyError(index)
-                data = {
-                    k: npz[k][index].astype(np.float32)
-                    if np.issubdtype(npz[k].dtype, np.floating)
-                    else npz[k][index]
-                    for k in npz.files
-                    if k != "players"
-                }
-            env = source.stem.split("-", 1)[1]
-            media = encode_media(RENDERERS[env](data))
-            if media is None:
-                raise TypeError(f"the {env!r} renderer returned nothing displayable")
-            content_type, body = media
-            rendered.mkdir(exist_ok=True)
-            path = rendered / f"{step}-{index}.{MEDIA_TYPES[content_type]}"
-            tmp = path.with_suffix(".tmp")
-            tmp.write_bytes(body)
-            tmp.replace(path)
-            return path
+    def member_episode(self, run_id: str, step: int, index: int) -> bytes:
+        """One of a generation's member episodes, packed for the dashboard."""
+        source = self._member_episode_files(self._dir(run_id))[step]
+        with np.load(source, allow_pickle=False) as npz:
+            if not 0 <= index < len(npz["players"]):
+                raise KeyError(index)
+            return pack_arrays({k: npz[k][index] for k in npz.files if k != "players"})
+
+    def episode(self, run_id: str, file: str) -> bytes:
+        """A test's episode, packed for the dashboard."""
+        path = self._dir(run_id) / "episodes" / _safe(file)
+        if not path.is_file():
+            raise KeyError(file)
+        with np.load(path, allow_pickle=False) as npz:
+            return pack_arrays({k: npz[k] for k in npz.files if k != "players"})
+
+    def _add_entry(self, run_dir: Path, entry: Dict[str, Any]) -> None:
+        """Append to the run's media, holding the lock."""
+        with open(run_dir / "media.jsonl", "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        meta = self._read_meta(run_dir)
+        meta["updated"] = entry["time"]
+        self._write_meta(run_dir, meta)
 
     def add_media(
         self,
@@ -406,42 +390,48 @@ class RunStore:
         step: int,
         content_type: str,
         data: bytes,
-        env: Optional[str] = None,
         players: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Store media; `env` names the environment of a rendered episode, and
-        `players` the genomes playing it, one per seat."""
+        """Store media; `players` names the genomes it shows."""
         run_dir = self._dir(run_id)
         ext = MEDIA_TYPES[content_type]
         file = f"{_safe(key)}-{step}.{ext}"
         entry = {"key": key, "step": step, "file": file, "time": time.time()}
-        if env is not None:
-            entry["env"] = env
         if players is not None:
             entry["players"] = players
         with self.lock:
             (run_dir / "media" / file).write_bytes(data)
-            with open(run_dir / "media.jsonl", "a") as f:
-                f.write(json.dumps(entry) + "\n")
-            meta = self._read_meta(run_dir)
-            meta["updated"] = entry["time"]
-            self._write_meta(run_dir, meta)
+            self._add_entry(run_dir, entry)
         return entry
 
-    def add_media_error(self, run_id: str, key: str, step: int, error: str) -> None:
-        """Record media that failed to render, so the dashboard can say why."""
+    def add_episode(
+        self, run_id: str, key: str, step: int, env: str, data: bytes
+    ) -> Dict[str, Any]:
+        """Store a test's episode, raw, for the dashboard to draw: an entry in the
+        run's media naming its `env`, and the genomes playing it, one per seat."""
         run_dir = self._dir(run_id)
-        entry = {"key": key, "step": step, "error": error, "time": time.time()}
+        file = f"{_safe(key)}-{step}.npz"
+        with np.load(io.BytesIO(data), allow_pickle=False) as npz:
+            arrays = {name: npz[name] for name in npz.files}
+        entry = {"key": key, "step": step, "env": env, "episode": file}
+        # who played each seat, if the run said, for the dashboard to name, with
+        # each one's reward over the episode if the run recorded it; a lone policy
+        # among bots says which seat is its
+        ids = arrays.get("players")
+        if ids is not None:
+            players = self.players(run_id, ids)
+            final = arrays["rewards"][-1] if "rewards" in arrays else None
+            seats = [int(arrays["policy"])] if "policy" in arrays else range(len(ids))
+            entry["players"] = [
+                _with_reward(p, final, s) for s, p in zip(seats, players)
+            ]
+        entry["time"] = time.time()
         with self.lock:
-            with open(run_dir / "media.jsonl", "a") as f:
-                f.write(json.dumps(entry) + "\n")
-
-    def save_episode(self, run_id: str, key: str, step: int, data: bytes) -> Path:
-        path = self._dir(run_id) / "episodes" / f"{_safe(key)}-{step}.npz"
-        # runs from before episodes were rendered here have no episodes/ folder
-        path.parent.mkdir(exist_ok=True)
-        path.write_bytes(data)
-        return path
+            # runs from before episodes were kept raw have no episodes/ folder
+            (run_dir / "episodes").mkdir(exist_ok=True)
+            (run_dir / "episodes" / file).write_bytes(data)
+            self._add_entry(run_dir, entry)
+        return entry
 
     def finish(self, run_id: str, status: str) -> None:
         run_dir = self._dir(run_id)
@@ -515,35 +505,40 @@ def _with_reward(player: Dict[str, Any], rewards: Any, *index: int) -> Dict[str,
     return {**player, "reward": float(rewards[index])}
 
 
-def render_episode(
-    store: RunStore, run_id: str, key: str, step: int, env: str, path: Path
-) -> None:
-    """Render a saved episode into media; on failure, record the error instead."""
-    try:
-        with np.load(path, allow_pickle=False) as npz:
-            data = {name: npz[name] for name in npz.files}
-        # who played each seat, if the run said, for the dashboard to name, with
-        # each one's reward over the episode if the run recorded it; a lone policy
-        # among bots says which seat is its
-        ids = data.pop("players", None)
-        players = None if ids is None else store.players(run_id, ids)
-        if players is not None:
-            final = data["rewards"][-1] if "rewards" in data else None
-            seats = [int(data["policy"])] if "policy" in data else range(len(players))
-            players = [_with_reward(p, final, s) for s, p in zip(seats, players)]
-        media = encode_media(RENDERERS[env](data))
-        if media is None:
-            raise TypeError(f"the {env!r} renderer returned nothing displayable")
-        store.add_media(run_id, key, step, *media, env=env, players=players)
-    except Exception as e:
-        traceback.print_exc()
-        store.add_media_error(run_id, key, step, f"{type(e).__name__}: {e}")
+def _env(query: Dict[str, List[str]]) -> str:
+    """The env an episode was logged for, which names the dashboard's renderer for
+    it, and the generation's file of members' episodes."""
+    env = query["env"][0]
+    if not re.fullmatch(r"[A-Za-z0-9_]+", env):
+        raise ValueError(f"env names are letters, digits and underscores, not {env!r}")
+    return env
+
+
+def pack_arrays(arrays: Dict[str, np.ndarray]) -> bytes:
+    """Arrays as the dashboard reads them (static/episodes.js loadArrays): the
+    length of a JSON header as a little-endian uint32, the header, {name: {"dtype",
+    "shape", "offset"}}, then each array's bytes from that offset past the header,
+    4-byte aligned. Floats go as float32, other numbers as int32, bools as uint8."""
+    header, chunks, offset = {}, [], 0
+    for name, a in arrays.items():
+        a = np.asarray(a)
+        if a.dtype == np.bool_:
+            a = a.astype(np.uint8)
+        elif np.issubdtype(a.dtype, np.floating):
+            a = a.astype("<f4")
+        else:
+            a = a.astype("<i4")
+        data = a.tobytes()
+        header[name] = {"dtype": a.dtype.name, "shape": a.shape, "offset": offset}
+        chunks.append(data + bytes(-len(data) % 4))
+        offset += len(chunks[-1])
+    head = json.dumps(header).encode()
+    head += b" " * (-len(head) % 4)
+    return len(head).to_bytes(4, "little") + head + b"".join(chunks)
 
 
 class Handler(BaseHTTPRequestHandler):
     store: RunStore
-    # one thread, so renders queue up rather than competing with request handling
-    renderer = ThreadPoolExecutor(max_workers=1)
 
     def log_message(self, format, *args):
         # one line per request is noise next to a training run
@@ -565,6 +560,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self) -> bytes:
         return self.rfile.read(int(self.headers.get("Content-Length", 0)))
+
+    def _arrays(self, body: bytes) -> None:
+        # raw floats compress several times over
+        if "gzip" not in self.headers.get("Accept-Encoding", ""):
+            self._send(HTTPStatus.OK, body, "application/octet-stream")
+            return
+        body = gzip.compress(body, compresslevel=5)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _file(self, path: Path) -> None:
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -622,33 +631,21 @@ class Handler(BaseHTTPRequestHandler):
                     except KeyError:
                         self._error(HTTPStatus.NOT_FOUND, "no episodes logged for it")
                         return
-                    # render its own game now (the first it's seated first in, which
-                    # is the one the dashboard shows), so it's ready sooner
-                    own = [e for e in episodes["episodes"] if e["seat"] == 0]
-                    for episode in own[:1]:
-                        self.renderer.submit(
-                            self.store.member_episode_media,
-                            run_id,
-                            episodes["step"],
-                            episode["index"],
-                        )
                     self._json(episodes)
                 case ["api", "runs", run_id, "member_episodes", step, index]:
                     try:
-                        path = self.store.member_episode_media(
-                            run_id, int(step), int(index)
-                        )
+                        body = self.store.member_episode(run_id, int(step), int(index))
                     except KeyError:
                         self._error(HTTPStatus.NOT_FOUND, "no such episode")
                         return
-                    except Exception as e:
-                        traceback.print_exc()
-                        self._error(
-                            HTTPStatus.INTERNAL_SERVER_ERROR,
-                            f"couldn't render: {type(e).__name__}: {e}",
-                        )
+                    self._arrays(body)
+                case ["api", "runs", run_id, "episodes", file]:
+                    try:
+                        body = self.store.episode(run_id, file)
+                    except KeyError:
+                        self._error(HTTPStatus.NOT_FOUND, "no such episode")
                         return
-                    self._file(path)
+                    self._arrays(body)
                 case ["media", run_id, file]:
                     self._file(self.store.media_path(run_id, file))
                 case [] | ["run", *_]:
@@ -686,14 +683,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.store.add_members(run_id, int(body["step"]), body)
                     self._json({"ok": True})
                 case ["api", "runs", run_id, "member_episodes"]:
-                    env = query["env"][0]
-                    if env not in RENDERERS:
-                        known = ", ".join(sorted(RENDERERS))
-                        self._error(
-                            HTTPStatus.BAD_REQUEST,
-                            f"no renderer for env {env!r} (known: {known})",
-                        )
-                        return
+                    env = _env(query)
                     self.store.save_member_episodes(
                         run_id, int(query["step"][0]), env, self._body()
                     )
@@ -704,9 +694,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     self._json({"ok": True})
                 case ["api", "runs", run_id, "returns"]:
-                    self.store.save_returns(
-                        run_id, int(query["step"][0]), self._body()
-                    )
+                    self.store.save_returns(run_id, int(query["step"][0]), self._body())
                     self._json({"ok": True})
                 case ["api", "runs", run_id, "media"]:
                     content_type = self.headers.get("Content-Type", "")
@@ -735,20 +723,15 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     self._json(entry, HTTPStatus.CREATED)
                 case ["api", "runs", run_id, "episodes"]:
-                    env = query["env"][0]
-                    if env not in RENDERERS:
-                        known = ", ".join(sorted(RENDERERS))
-                        self._error(
-                            HTTPStatus.BAD_REQUEST,
-                            f"no renderer for env {env!r} (known: {known})",
-                        )
-                        return
-                    key, step = query["key"][0], int(query["step"][0])
-                    path = self.store.save_episode(run_id, key, step, self._body())
-                    self.renderer.submit(
-                        render_episode, self.store, run_id, key, step, env, path
+                    env = _env(query)
+                    entry = self.store.add_episode(
+                        run_id,
+                        key=query["key"][0],
+                        step=int(query["step"][0]),
+                        env=env,
+                        data=self._body(),
                     )
-                    self._json({"queued": True}, HTTPStatus.ACCEPTED)
+                    self._json(entry, HTTPStatus.CREATED)
                 case ["api", "runs", run_id, "finish"]:
                     body = json.loads(self._body() or b"{}")
                     self.store.finish(run_id, body.get("status", "finished"))

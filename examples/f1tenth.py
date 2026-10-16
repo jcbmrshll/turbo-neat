@@ -81,11 +81,13 @@ class RaceState:
 @dataclass(frozen=True)
 class RaceFrame:
     """What the monitor draws of a race at a moment: each car's x, y, steering
-    angle, speed and heading, whether it has crashed, and its reward so far."""
+    angle, speed and heading, whether it has crashed, and its reward so far; and
+    what each car saw, for it to show the networks' activations."""
 
     cars: jax.Array
     crashed: jax.Array
     rewards: jax.Array
+    obs: jax.Array
 
 
 class F1TenthRace:
@@ -307,7 +309,10 @@ class F1TenthRace:
         """What a recording keeps of a race's state, for the monitor."""
         cars = state.env_state.cartesian_states[..., :5]
         return RaceFrame(
-            cars=cars, crashed=state.env_state.collisions, rewards=state.rewards
+            cars=cars,
+            crashed=state.env_state.collisions,
+            rewards=state.rewards,
+            obs=state.obs,
         )
 
     def step_mp(
@@ -513,8 +518,11 @@ def make_episode_fn(race: F1TenthRace):
             env_state = state.race.env_state
             cars, crashed = env_state.cartesian_states, env_state.collisions
             rewards = state.race.rewards
+            # only the policy's car has a network
+            obs = np.asarray(state.obs)[..., None, :]
         else:
             cars, crashed, rewards = state.cars, state.crashed, state.rewards
+            obs = np.asarray(state.obs)
         cars = np.asarray(cars)
         poses = cars[..., [0, 1, 4]]
         # every recorded race carries its own copy of the track, as the monitor
@@ -530,9 +538,11 @@ def make_episode_fn(race: F1TenthRace):
             crashed=np.asarray(crashed),
             # each car's reward so far, at every frame
             rewards=np.asarray(rewards),
+            obs=obs,
         )
         if against_bots:
             data["policy"] = np.asarray(state.seat[0])
+            data["obs_seats"] = np.asarray(state.seat[:1])
         # the generation's fittest racing each other, as against a race of members
         # (several, with a leading race axis) or of the policy and the bots
         field = not against_bots and races == ()
