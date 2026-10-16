@@ -1,0 +1,15 @@
+// the colours episodes are drawn in, for renderers.js and f1tenth.js
+
+// the dashboard's palette: its CSS tokens (style.css)
+export const WELL = "#faf2de"; // --well
+export const EDGE = "#cdb188"; // --edge
+export const EDGE_SOFT = "#dcc6a4"; // --edge-soft
+export const SUNKEN = "#e6d3b1"; // --sunken
+export const INK = "#3f2606"; // --fg
+export const MID = "#6b4a1e"; // --mid
+export const DIM = "#75592f"; // --dim
+export const ACCENT = "#8f5c14"; // --accent
+export const BLUE = "#1263cc"; // --s1
+export const ORANGE = "#c2541b"; // --s2
+// the agent whose network is shown, ringed in this
+export const PICKED = "#0f8f6a"; // --s3

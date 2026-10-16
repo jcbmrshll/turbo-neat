@@ -8,7 +8,7 @@ Inspired by compute constraints faced at that time, NEAT is an evolutionary trai
 ## Quickstart
 
 ## Monitoring runs
-Training runs push metrics, an episode from each periodic test of the population, and every member of every generation (with its network, its reward in every episode it played for its fitness, and one of those episodes) to a small local dashboard. Members get names (`big-red-dog`: two adjectives for the individual, an animal for its species), a leaderboard, and a lineage view that traces any of them back through its parents:
+Training runs push metrics, an episode from each periodic test of the population, and every member of every generation (with its network, its reward in every episode it played for its fitness, and one of those episodes) to a small local dashboard. Members get names (`big-red-dog`: two adjectives for the individual, an animal for its species), a leaderboard, and a lineage view that traces any of them back through its parents. Episodes play in the browser, and when a run logs what its agents saw (`Episode(..., obs=...)`), the network beside an episode lights up with its activations frame by frame; click an agent to see its network:
 
 ```sh
 uv run turbo-neat-monitor            # http://localhost:8008, runs stored in ./runs

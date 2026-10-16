@@ -1,5 +1,5 @@
-"""Turning renderable values into bytes the dashboard can show. Used by the client
-for media a run logs directly, and by the server for the episodes it renders."""
+"""Turning renderable values into bytes the dashboard can show, for media a run
+logs directly (episodes it logs raw, and the dashboard draws them itself)."""
 
 import io
 import json

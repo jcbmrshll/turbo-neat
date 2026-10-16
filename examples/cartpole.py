@@ -96,9 +96,13 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
 
 def episode_fn(state):
     """An episode as raw cart states (x, x_vel, theta, theta_vel), for the monitor to
-    draw; also packs the members' recorded episodes at once, with a leading episode
-    axis."""
-    return Episode("cartpole", state=state.state[..., ::FRAME_STRIDE, :])
+    draw, and what the policy saw at each, for it to show the network's activations;
+    also packs the members' recorded episodes at once, with a leading episode axis."""
+    return Episode(
+        "cartpole",
+        state=state.state[..., ::FRAME_STRIDE, :],
+        obs=state.obs[..., ::FRAME_STRIDE, :],
+    )
 
 
 def main():

@@ -181,16 +181,22 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
 
 def episode_fn(state):
     """A game as raw positions, for the monitor to draw: the ball's x, y, r and each
-    slime's x, y, r, direction and lives. Packs the test game against the baseline
-    policy, and the members' recorded self-play games at once (with a leading game
-    axis)."""
+    slime's x, y, r, direction and lives; and what each policy saw, for it to show
+    their networks' activations. Packs the test game against the baseline policy,
+    and the members' recorded self-play games at once (with a leading game axis)."""
     game = state.game_state
     agents = [
         jnp.stack([a.x, a.y, a.r, a.direction, a.life], axis=-1)
         for a in (game.agent_left, game.agent_right)
     ]
     ball = jnp.stack([game.ball.x, game.ball.y, game.ball.r], axis=-1)
-    return Episode("slimevolley", ball=ball, left=agents[0], right=agents[1])
+    if isinstance(state, State2p):
+        # both slimes, left then right
+        obs = dict(obs=state.obs)
+    else:
+        # against the baseline, the policy is the right slime
+        obs = dict(obs=state.obs[..., None, :], obs_seats=jnp.array([1]))
+    return Episode("slimevolley", ball=ball, left=agents[0], right=agents[1], **obs)
 
 
 def main():

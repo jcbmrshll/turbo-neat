@@ -30,9 +30,15 @@ DEFAULT_URL = "http://localhost:8008"
 
 
 class Episode:
-    """The raw data of one episode, e.g. Episode("boids", boids=states). The server
-    renders it with its renderer for `env` (see monitor.renderers), so the
-    training run never draws anything."""
+    """The raw data of one episode, e.g. Episode("boids", boids=states). The
+    dashboard draws it with its renderer for `env` (monitor/static/renderers.js), so
+    the training run never draws anything.
+
+    With obs, what the agents saw at each frame, (frames, agents, obs_size) or
+    (frames, obs_size) for one, the dashboard reruns their networks to show what
+    they did at each frame. Agent i is the one in seat i, played by the genome in
+    that seat, or by the one genome, if one plays them all; obs_seats, (agents,),
+    seats them otherwise, e.g. a policy among bots."""
 
     def __init__(self, env: str, **data: Any):
         self.env = env
