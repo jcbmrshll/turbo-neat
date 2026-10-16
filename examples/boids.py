@@ -19,6 +19,8 @@ from neat.species import make_improvement_stagnation_fn
 from neat.testing import make_top_k_test
 
 NUM_STEPS = 100
+# episodes each genome plays for its fitness
+NUM_EPISODES = 8
 
 
 def get_input_label(idx: int) -> str:
@@ -118,7 +120,13 @@ def main():
         config=make_config(train_task.obs_shape[0], train_task.act_shape[0]),
         # record every member's episode for the monitor's lineage view
         fitness_fn=make_fitness_fn(
-            task=train_task, num_steps=NUM_STEPS, record=args.monitor is not None
+            task=train_task,
+            num_steps=NUM_STEPS,
+            num_episodes=NUM_EPISODES,
+            record=args.monitor is not None,
+            # one random start ranks the fittest poorly, and genomes are only
+            # comparable on the same ones
+            replicate_rng=True,
         ),
         # every 10th generation's 10 fittest, over 100 episodes each
         test_fn=make_top_k_test(

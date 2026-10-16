@@ -15,22 +15,20 @@ id. Genome ids are handed out densely, in birth order, so a genome's parents alw
 have smaller ids than it does.
 """
 
+import bisect
 import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from monitor.aliases import alias, species_alias
 
-# what the leaderboard can rank by, highest first
-SORTS = ("fitness", "best", "age", "children")
-# points of rank history sent with each leaderboard row, for its sparkline
-SPARK_POINTS = 40
-# the pedigree stops growing past this many ancestors, however deep it was asked to go
-MAX_PEDIGREE = 160
+# how many parents off the line of descent the pedigree reaches: each step brings at
+# most twice as many ancestors per member of the line
+PEDIGREE_REACH = 3
 
 
 def _num(x: Any) -> Optional[float]:
@@ -166,13 +164,10 @@ class Lineage:
             "parents": [int(p) for p in self.parents[gid]],
         }
 
-    def history(self, gid: int, since: Optional[int] = None) -> List[List[Any]]:
-        """[step, fitness, rank] for every generation the genome was in, from `since`
-        on."""
+    def history(self, gid: int) -> List[List[Any]]:
+        """[step, fitness, rank] for every generation the genome was in."""
         lo = self.gen_index[int(self.born[gid])]
         hi = self.gen_index[int(self.last[gid])]
-        if since is not None:
-            lo = max(lo, self.gen_index.get(since, lo))
         points = []
         for gen in self.generations[lo : hi + 1]:
             where = np.flatnonzero(gen.ids == gid)
@@ -187,43 +182,89 @@ class Lineage:
     def species_names(self) -> Dict[int, str]:
         return {s: species_alias(s) for s in range(self.max_species + 1)}
 
-    def leaderboard(self, scope: str, sort: str, limit: int) -> Dict[str, Any]:
-        """The top `limit` genomes by `sort`, among the current generation ("alive")
-        or everyone the run has seen ("all")."""
+    def generation_at(self, step: Optional[int]) -> Generation:
+        """The generation logged at epoch `step`, or the last one before it (the
+        latest if None)."""
+        if step is None or not self.generations:
+            return self.generations[-1]
+        steps = [g.step for g in self.generations]
+        return self.generations[max(0, bisect.bisect_right(steps, step) - 1)]
+
+    def as_of(self, gen: Generation) -> Tuple[np.ndarray, ...]:
+        """Every genome's fitness, species and last epoch as of generation `gen`, as
+        last seen up to then, and how many children it had by then."""
+        if gen is self.latest:
+            return self.fitness, self.species, self.last, self.children
+        n = len(self.born)
+        fitness = np.full(n, np.nan)
+        species = np.full(n, -1, dtype=np.int32)
+        last = np.full(n, -1, dtype=np.int32)
+        for g in self.generations[: self.gen_index[gen.step] + 1]:
+            fitness[g.ids] = g.fitness
+            species[g.ids] = g.species
+            last[g.ids] = g.step
+        children = np.zeros(n, dtype=np.int32)
+        born = (self.born >= 0) & (self.born <= gen.step)
+        primary, mate = self.parents[born, 0], self.parents[born, 1]
+        np.add.at(children, primary[primary >= 0], 1)
+        np.add.at(children, mate[(mate >= 0) & (mate != primary)], 1)
+        return fitness, species, last, children
+
+    def leaderboard(
+        self,
+        scope: str,
+        limit: int,
+        species: Optional[int] = None,
+        step: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """The `limit` fittest genomes among a generation ("alive") or everyone the
+        run had seen by then ("all"), of one species if given; and the species there
+        are to choose from, biggest first. The generation is the latest, or the one
+        logged at epoch `step` (or the last before it), with everyone's record as it
+        stood then."""
         latest = self.latest
         if latest is None:
-            return {"step": None, "rows": [], "species_names": {}}
-        if sort not in SORTS:
-            raise ValueError(f"sort must be one of {', '.join(SORTS)}")
+            return {"step": None, "rows": [], "species": [], "species_names": {}}
+        gen = self.generation_at(step)
         if scope == "alive":
-            ids = np.unique(latest.ids)
+            ids = np.unique(gen.ids)
         elif scope == "all":
-            ids = np.flatnonzero(self.born >= 0)
+            ids = np.flatnonzero((self.born >= 0) & (self.born <= gen.step))
         else:
             raise ValueError("scope must be alive or all")
-        keys = {
-            "fitness": self.fitness[ids],
-            "best": self.best[ids],
-            "age": (self.last[ids] - self.born[ids]).astype(np.float64),
-            "children": self.children[ids].astype(np.float64),
-        }
-        # highest first, ties broken by best fitness, then by the oldest id
-        primary = np.nan_to_num(keys[sort], nan=-np.inf)
-        tiebreak = np.nan_to_num(keys["best"], nan=-np.inf)
-        order = np.lexsort((ids, -tiebreak, -primary))[:limit]
-        rows = []
-        for gid in ids[order].tolist():
-            row = self.summary(gid)
-            spark_from = max(
-                int(self.born[gid]), int(self.last[gid]) - SPARK_POINTS + 1
-            )
-            row["history"] = self.history(gid, since=spark_from)
-            rows.append(row)
+        fitness, species_of, last, children = self.as_of(gen)
+        # a genome's species is the one it was in when last seen
+        present, counts = np.unique(species_of[ids], return_counts=True)
+        if species is not None:
+            ids = ids[species_of[ids] == species]
+        # fittest first, ties to the oldest id
+        order = np.lexsort((ids, -np.nan_to_num(fitness[ids], nan=-np.inf)))[:limit]
+
+        def row(gid: int) -> Dict[str, Any]:
+            born, seen = int(self.born[gid]), int(last[gid])
+            return {
+                "id": gid,
+                "name": alias(gid, int(self.birth_species[gid])),
+                "species_name": species_alias(int(species_of[gid])),
+                "birth_species": int(self.birth_species[gid]),
+                "born": born,
+                "last": seen,
+                "alive": seen == gen.step,
+                "age": seen - born + 1,
+                "fitness": _num(fitness[gid]),
+                "children": int(children[gid]),
+            }
+
         return {
-            "step": latest.step,
-            "population": int(len(latest.ids)),
-            "total": int((self.born >= 0).sum()),
-            "rows": rows,
+            "step": gen.step,
+            "latest": latest.step,
+            "population": int(len(gen.ids)),
+            "total": int(((self.born >= 0) & (self.born <= gen.step)).sum()),
+            "rows": [row(gid) for gid in ids[order].tolist()],
+            "species": [
+                {"id": int(s), "name": species_alias(int(s)), "members": int(n)}
+                for s, n in sorted(zip(present, counts), key=lambda sn: -sn[1])
+            ],
             "species_names": self.species_names(),
         }
 
@@ -244,10 +285,10 @@ class Lineage:
         desc[gid] = False
         return int(desc[latest.ids].sum())
 
-    def individual(self, gid: int, depth: int) -> Dict[str, Any]:
+    def individual(self, gid: int) -> Dict[str, Any]:
         """Everything the lineage view shows about one genome: its record, its own
-        fitness history, its line of descent back to a founder, its children, and
-        its pedigree `depth` generations of parents back."""
+        fitness history, its children, and its pedigree: its line of descent back
+        to a founder, and the ancestors up to PEDIGREE_REACH parents off it."""
         if not self.known(gid):
             raise KeyError(gid)
         latest = self.generations[-1]
@@ -258,47 +299,27 @@ class Lineage:
         while self.parents[line[-1], 0] >= 0:
             line.append(int(self.parents[line[-1], 0]))
         line.reverse()
-        # fitness along the line: each ancestor's own, until its heir is born
-        line_fitness: List[List[Any]] = []
-        for i, aid in enumerate(line):
-            heir_born = self.born[line[i + 1]] if i + 1 < len(line) else None
-            line_fitness += [
-                p[:2]
-                for p in self.history(aid)
-                if heir_born is None or p[0] < heir_born
-            ]
-        line_rows = []
-        for aid in line:
-            row = self.summary(aid)
-            primary, mate = self.parents[aid]
-            if mate >= 0 and mate != primary:
-                row["mate"] = {
-                    "id": int(mate),
-                    "name": alias(int(mate), int(self.birth_species[mate])),
-                }
-            line_rows.append(row)
 
-        # the pedigree: ancestors through both parents, nearest first
-        depth_of = {gid: 0}
-        frontier = [gid]
-        for d in range(1, depth + 1):
+        # the pedigree: the whole line, then each step through either parent takes
+        # an ancestor one further off it. Counting fitter parents too keeps it to
+        # 2 + 4 + ... + 2^reach ancestors per member of the line, not every mate's
+        # own line back to a founder
+        reach_of = {aid: 0 for aid in line}
+        frontier = line
+        for r in range(1, PEDIGREE_REACH + 1):
             nxt = []
             for x in frontier:
                 for p in self.parents[x].tolist():
-                    if p >= 0 and p not in depth_of:
-                        depth_of[p] = d
+                    if p >= 0 and p not in reach_of:
+                        reach_of[p] = r
                         nxt.append(p)
             frontier = nxt
-            if len(depth_of) >= MAX_PEDIGREE:
-                break
-        on_line = set(line)
         pedigree = []
-        for aid, d in depth_of.items():
+        for aid, r in reach_of.items():
             node = self.summary(aid)
-            node["depth"] = d
-            node["on_line"] = aid in on_line
+            node["reach"] = r
+            node["on_line"] = r == 0
             pedigree.append(node)
-        deeper = any((self.parents[x] >= 0).any() for x in frontier)
 
         child_ids = np.flatnonzero(
             (self.parents[:, 0] == gid) | (self.parents[:, 1] == gid)
@@ -315,9 +336,7 @@ class Lineage:
             "population": int(len(latest.ids)),
             "history": self.history(gid),
             "descendants": self.living_descendants(gid),
-            "line": line_rows,
-            "line_fitness": line_fitness,
-            "pedigree": {"nodes": pedigree, "depth": depth, "deeper": deeper},
+            "pedigree": pedigree,
             "child_list": children[:60],
             "species_names": self.species_names(),
         }

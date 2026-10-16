@@ -14,6 +14,8 @@ Everything lives on disk under the run directory, one folder per run:
     <dir>/<run id>/episodes/      raw episode data (.npz), rendered into media/
     <dir>/<run id>/networks/      every member's network, one .npz per generation
                                   (see monitor.networks)
+    <dir>/<run id>/returns/       every member's reward in each episode it played
+                                  for its fitness, one .npz per generation
     <dir>/<run id>/member_episodes/  the episodes members played for their fitness,
                                   <step>-<env>.npz per generation, rendered into
                                   rendered/ the first time one is asked for
@@ -82,6 +84,8 @@ class RunStore:
         self.lock = threading.Lock()
         # run id -> its lineage, indexed on first use and kept up to date after
         self.lineages: Dict[str, Lineage] = {}
+        # run id -> its latest mean fitness, for runs whose meta doesn't keep it
+        self.mean_fitness: Dict[str, Optional[float]] = {}
         # members' episodes render one at a time, like the tests'
         self.render_lock = threading.Lock()
 
@@ -138,6 +142,9 @@ class RunStore:
             meta = self._read_meta(run_dir)
             meta["updated"] = now
             meta["step"] = step if meta["step"] is None else max(meta["step"], step)
+            # the run list shows it, without reading every run's metrics
+            if "mean_fitness" in metrics:
+                meta["mean_fitness"] = metrics["mean_fitness"]
             self._write_meta(run_dir, meta)
 
     def add_members(self, run_id: str, step: int, body: Dict[str, Any]) -> None:
@@ -174,11 +181,16 @@ class RunStore:
         return lineage
 
     def leaderboard(
-        self, run_id: str, scope: str, sort: str, limit: int
+        self,
+        run_id: str,
+        scope: str,
+        limit: int,
+        species: Optional[int],
+        step: Optional[int],
     ) -> Dict[str, Any]:
         lineage = self.lineage(run_id)
         with lineage.lock:
-            return lineage.leaderboard(scope, sort, limit)
+            return lineage.leaderboard(scope, limit, species, step)
 
     def players(self, run_id: str, genome_ids: Any) -> List[Dict[str, Any]]:
         """Genomes by id, name and the species they were born into (None for any
@@ -198,24 +210,65 @@ class RunStore:
                 )
             return players
 
-    def individual(self, run_id: str, genome_id: int, depth: int) -> Dict[str, Any]:
+    def individual(self, run_id: str, genome_id: int) -> Dict[str, Any]:
         lineage = self.lineage(run_id)
         with lineage.lock:
-            return lineage.individual(genome_id, depth)
+            individual = lineage.individual(genome_id)
+        individual["returns"] = self.returns(
+            run_id, genome_id, individual["born"], individual["last"]
+        )
+        return individual
 
-    def save_networks(self, run_id: str, step: int, data: bytes) -> None:
-        path = self._dir(run_id) / "networks" / f"{step}.npz"
+    def _save(self, run_id: str, kind: str, step: int, data: bytes) -> None:
+        path = self._dir(run_id) / kind / f"{step}.npz"
         path.parent.mkdir(exist_ok=True)
         # written aside and moved into place, so a reader never sees half a file
         tmp = path.with_suffix(".tmp")
         tmp.write_bytes(data)
         tmp.replace(path)
 
+    def save_networks(self, run_id: str, step: int, data: bytes) -> None:
+        self._save(run_id, "networks", step, data)
+
+    def save_returns(self, run_id: str, step: int, data: bytes) -> None:
+        self._save(run_id, "returns", step, data)
+
+    def returns(
+        self, run_id: str, genome_id: int, born: int, last: int
+    ) -> Optional[Dict[str, Any]]:
+        """A summary of the member's reward in every episode it played, over every
+        epoch it was alive, or None if the run didn't log them."""
+        run_dir = self._dir(run_id)
+        rewards, epochs = [], 0
+        for step in range(born, last + 1):
+            path = run_dir / "returns" / f"{step}.npz"
+            if not path.exists():
+                continue
+            with np.load(path, allow_pickle=False) as npz:
+                row = np.flatnonzero(npz["ids"] == genome_id)
+                if row.size:
+                    rewards.append(npz["returns"][row[0]])
+                    epochs += 1
+        if not rewards:
+            return None
+        r = np.concatenate(rewards)
+        r = r[np.isfinite(r)]
+        if not r.size:
+            return None
+        return {
+            "episodes": int(r.size),
+            "epochs": epochs,
+            "mean": float(r.mean()),
+            "median": float(np.median(r)),
+            "max": float(r.max()),
+            "min": float(r.min()),
+            "stddev": float(r.std()),
+        }
+
     def network(
         self, run_id: str, genome_id: int, step: Optional[int]
     ) -> Dict[str, Any]:
-        """A member's network in one of its generations (its latest by default), and
-        the generations it has one for."""
+        """A member's network in one of its generations (its latest by default)."""
         run_dir = self._dir(run_id)
         lineage = self.lineage(run_id)
         with lineage.lock:
@@ -246,7 +299,7 @@ class RunStore:
             input_labels=genome_config.get("input_labels"),
             output_labels=genome_config.get("output_labels"),
         )
-        return {**network, "step": step, "steps": steps}
+        return {**network, "step": step}
 
     def save_member_episodes(
         self, run_id: str, step: int, env: str, data: bytes
@@ -266,7 +319,7 @@ class RunStore:
         self, run_id: str, genome_id: int, step: Optional[int]
     ) -> Dict[str, Any]:
         """The episodes a member played in one of its generations (its latest by
-        default), who played them with it, and the generations it has any for."""
+        default), and who played them with it."""
         run_dir = self._dir(run_id)
         lineage = self.lineage(run_id)
         with lineage.lock:
@@ -307,7 +360,6 @@ class RunStore:
             ]
         return {
             "step": step,
-            "steps": steps,
             "env": files[step].stem.split("-", 1)[1],
             "episodes": episodes,
         }
@@ -407,8 +459,24 @@ class RunStore:
             except (OSError, ValueError):
                 continue
             meta.pop("config", None)
+            if "mean_fitness" not in meta:
+                meta["mean_fitness"] = self._last_mean_fitness(run_dir)
             runs.append(meta)
         return sorted(runs, key=lambda m: m["created"], reverse=True)
+
+    def _last_mean_fitness(self, run_dir: Path) -> Optional[float]:
+        """The latest mean fitness in a run's metrics, for runs from before the meta
+        kept it; read once."""
+        if run_dir.name not in self.mean_fitness:
+            value = None
+            try:
+                with open(run_dir / "metrics.jsonl") as f:
+                    for line in f:
+                        value = json.loads(line).get("mean_fitness", value)
+            except (OSError, ValueError):
+                pass
+            self.mean_fitness[run_dir.name] = value
+        return self.mean_fitness[run_dir.name]
 
     def get(self, run_id: str) -> Dict[str, Any]:
         return self._read_meta(self._dir(run_id))
@@ -521,17 +589,16 @@ class Handler(BaseHTTPRequestHandler):
                     board = self.store.leaderboard(
                         run_id,
                         scope=query.get("scope", ["alive"])[0],
-                        sort=query.get("sort", ["fitness"])[0],
                         limit=min(int(query.get("limit", ["50"])[0]), 500),
+                        species=(
+                            int(query["species"][0]) if "species" in query else None
+                        ),
+                        step=int(query["epoch"][0]) if "epoch" in query else None,
                     )
                     self._json(board)
                 case ["api", "runs", run_id, "individuals", genome_id]:
                     try:
-                        individual = self.store.individual(
-                            run_id,
-                            int(genome_id),
-                            depth=min(int(query.get("depth", ["6"])[0]), 50),
-                        )
+                        individual = self.store.individual(run_id, int(genome_id))
                     except KeyError:
                         self._error(HTTPStatus.NOT_FOUND, "no such individual")
                         return
@@ -633,6 +700,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True})
                 case ["api", "runs", run_id, "networks"]:
                     self.store.save_networks(
+                        run_id, int(query["step"][0]), self._body()
+                    )
+                    self._json({"ok": True})
+                case ["api", "runs", run_id, "returns"]:
+                    self.store.save_returns(
                         run_id, int(query["step"][0]), self._body()
                     )
                     self._json({"ok": True})
