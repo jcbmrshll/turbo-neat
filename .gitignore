@@ -165,3 +165,4 @@ wandb/
 # turbo-neat monitor runs
 runs/
 neural_network.png
+.zed/
