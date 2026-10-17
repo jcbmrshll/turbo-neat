@@ -3,8 +3,11 @@
 Genomes are paired off against each other for fitness. Every 10th generation, the
 10 fittest are each scored against EvoJAX's built-in baseline policy.
 
-The population of 1000 wants a GPU; expect the best score against the baseline to
-climb from about -10 to above -1 within the first 50 generations.
+Whether self-play gets going is down to luck early on, and the more genomes each
+generation, the better the odds, so the population of 4000 wants a GPU. In ten runs
+of it, the best score against the baseline climbed from about -10 to better than -2
+within 40 generations in eight, and stalled near -8 in the other two. With 1000,
+about one run in four took off.
 
     uv run examples/slimevolley.py --generations 100
     uv run examples/slimevolley.py --monitor
@@ -154,7 +157,7 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
     )
 
     selection_config = SelectionConfig(
-        population_size=1000,
+        population_size=4000,
         cutoff_pct=0.1,
         speciation_threshold=2.0,
         compatibility_coefficients=(1.0, 0.5),

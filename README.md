@@ -151,7 +151,7 @@ uv run examples/cartpole.py --help
 
 Swing a pole up from hanging below a cart and balance it, by pushing the cart left or right without running off the track ([EvoJAX's cartpole swing-up](https://github.com/google/evojax/blob/main/evojax/task/cartpole.py)).
 
-![Cartpole](assets/examples/cartpole.gif)
+![Cartpole](assets/examples/cartpole.webp)
 
 ```sh
 # --harder: random starts, anywhere on the track, already moving, the pole anywhere
@@ -165,7 +165,7 @@ A flock of 30 'boids' all steer by one evolved network, each seeing its 5 neares
 
 
 
-![Boids](assets/examples/boids.gif)
+![Boids](assets/examples/boids.webp)
 
 ```sh
 uv run examples/boids.py --generations 100 --seed 0 --monitor
@@ -175,7 +175,7 @@ uv run examples/boids.py --generations 100 --seed 0 --monitor
 
 Two-player volleyball ([EvoJAX's SlimeVolley](https://github.com/google/evojax/blob/main/evojax/task/slimevolley.py)): genomes are paired off against each other for fitness, and evaluated against the evojax baseline player.
 
-![SlimeVolley](assets/examples/slimevolley.gif)
+![SlimeVolley](assets/examples/slimevolley.webp)
 
 ```sh
 uv run examples/slimevolley.py --generations 100 --seed 0 --monitor
@@ -185,27 +185,29 @@ uv run examples/slimevolley.py --generations 100 --seed 0 --monitor
 
 Cars race each other around a track from [f1tenth_gym_jax](https://github.com/f1tenth/f1tenth_gym_jax), with simple lidar input and nearby car telemetry, and score based on the distance they cover before the end of the episode without hitting walls or other cars.
 
-![F1TENTH racing](assets/examples/f1tenth.gif)
+![F1TENTH racing](assets/examples/f1tenth.webp)
 
 ```sh
-# --cars:       cars in each race
+# --cars:       cars in each race (11 by default)
 # --map:        the track, by name from f1tenth_racetracks (downloaded on first use)
 # --test:       every 10th generation, the fittest race each other (field), or
 #   each races pure-pursuit bots that follow the centerline (bots)
 # --population: genomes in the population; lower it for a smaller GPU
-uv run examples/f1tenth.py --generations 100 --seed 0 --cars 4 --map Spielberg --test field --population 1000 --monitor
+# self-play takes a few hundred generations to get going, and 1000 take about
+#   5.5 hours on an RTX 5080
+uv run examples/f1tenth.py --generations 1000 --seed 0 --monitor
 ```
 
 ### Backprop NEAT
 Daivd Ha's blog post [Neural Network Evolution with Backprop NEAT](https://blog.otoro.net/2016/05/07/backprop-neat/) outlines a hybrid training approach that uses classic backpropogation for weight updates and NEAT for topological search.
 
-The following examples are impossible to fully solve without adding hidden layer neurons.
+The following examples are impossible to fully solve without adding hidden layer neurons. Their animations follow the final fittest network's line of descent from its founder, one ancestor at a time: its decision boundary, and its network.
 
 ### XOR (backprop NEAT)
 
 Classify 2D points by whether their coordinates have the same sign.
 
-![XOR](assets/examples/xor.gif)
+![XOR](assets/examples/xor.webp)
 
 ```sh
 uv run examples/xor.py --generations 100 --seed 0 --monitor
@@ -215,7 +217,7 @@ uv run examples/xor.py --generations 100 --seed 0 --monitor
 
 Classify points from two interleaved spirals.
 
-![Two spirals](assets/examples/spiral.gif)
+![Two spirals](assets/examples/spiral.webp)
 
 ```sh
 uv run examples/spiral.py --generations 300 --seed 0 --monitor

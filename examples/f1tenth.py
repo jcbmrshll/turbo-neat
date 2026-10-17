@@ -13,8 +13,16 @@ of their races. With --test bots, the 10 fittest each race pure pursuit bots tha
 follow the track's centerline instead, scoring the distance they cover, and the
 monitor shows the best one's race.
 
-    uv run examples/f1tenth.py --generations 100
-    uv run examples/f1tenth.py --cars 6 --monitor
+The defaults race 11 cars, 8 m apart on the grid, 20 races per genome each
+generation, in 20-second races, and test the field in 60-second races. Self-play
+takes a while to get going: in three runs of them, the cars only learned to race
+past the first corner after about 130, 180 and 550 generations. Two of those
+fields went on to cover more than a lap of Spielberg (about 343 m) in a test race,
+the faster by generation 350. 1000 generations take about 5.5 hours on an RTX
+5080.
+
+    uv run examples/f1tenth.py
+    uv run examples/f1tenth.py --monitor
 
 Start the monitor first with `uv run turbo-neat-monitor`.
 """
@@ -62,7 +70,7 @@ WALL_CHECK_SPACING = 0.1
 # control rate
 RECORD_HZ = 20
 # the starting grid: metres between places, and either side of the centerline
-GRID_SPACING, GRID_OFFSET = 1.5, 0.4
+GRID_SPACING, GRID_OFFSET = 8.0, 0.4
 # a car this far off the centerline has left the track (Spielberg is 2.2m wide)
 MAX_LATERAL_ERROR = 1.5
 
@@ -549,8 +557,8 @@ def make_episode_fn(race: F1TenthRace):
 def main():
     parser = argparse.ArgumentParser(description="Race F1TENTH cars by self-play.")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--generations", type=int, default=100)
-    parser.add_argument("--cars", type=int, default=4, help="cars in each race")
+    parser.add_argument("--generations", type=int, default=1000)
+    parser.add_argument("--cars", type=int, default=11, help="cars in each race")
     parser.add_argument("--map", default="Spielberg", help="an F1TENTH track")
     parser.add_argument(
         "--race-seconds", type=float, default=20.0, help="length of a race"
@@ -558,17 +566,17 @@ def main():
     parser.add_argument(
         "--test-seconds",
         type=float,
-        default=None,
+        default=60.0,
         help="length of the test races (the ones the monitor shows), if not "
         "--race-seconds",
     )
     parser.add_argument(
-        "--rounds", type=int, default=4, help="races each genome runs per generation"
+        "--rounds", type=int, default=20, help="races each genome runs per generation"
     )
     parser.add_argument(
         "--parallel-rounds",
         type=int,
-        default=1,
+        default=4,
         help="rounds raced side by side, --population x this many cars at once: "
         "worth raising until that's around 6000-12000 cars (where an RTX 5080 "
         "is fully busy)",
@@ -593,7 +601,7 @@ def main():
         default=10,
         help="generations between tests",
     )
-    parser.add_argument("--population", type=int, default=1000, help="population size")
+    parser.add_argument("--population", type=int, default=1500, help="population size")
     parser.add_argument(
         "--max-speed",
         type=float,
