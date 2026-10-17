@@ -519,7 +519,6 @@ table.board {
 .ep-player { display: inline-flex; align-items: center; white-space: nowrap; }
 .ep-player b { font-weight: 600; color: var(--fg-strong); }
 .ep-player .seat { margin-left: 5px; color: var(--dim); }
-.ep-player .seat:first-child { margin: 0 7px 0 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 7px 11px 10px; font: 11px var(--mono); }
 .chip { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .chip .swatch { margin-right: 0; }
