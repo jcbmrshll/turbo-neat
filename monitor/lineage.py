@@ -285,6 +285,22 @@ class Lineage:
         desc[gid] = False
         return int(desc[latest.ids].sum())
 
+    def line_of_descent(self, gid: int) -> List[int]:
+        """The genome's line of descent, founder first: each member's fitter parent,
+        whose structure it inherits. Ids only go down, so this always ends at a
+        founder."""
+        line = [gid]
+        while self.parents[line[-1], 0] >= 0:
+            line.append(int(self.parents[line[-1], 0]))
+        line.reverse()
+        return line
+
+    def fitness_at_birth(self, gid: int) -> Optional[float]:
+        """The genome's fitness in the generation it was born into."""
+        gen = self.generations[self.gen_index[int(self.born[gid])]]
+        where = np.flatnonzero(gen.ids == gid)
+        return _num(gen.fitness[where[0]]) if where.size else None
+
     def individual(self, gid: int) -> Dict[str, Any]:
         """Everything the lineage view shows about one genome: its record, its own
         fitness history, its offspring, and its pedigree: its line of descent back
@@ -293,12 +309,7 @@ class Lineage:
             raise KeyError(gid)
         latest = self.generations[-1]
 
-        # the line of descent follows the fitter parent, whose structure the
-        # offspring inherits; ids only go down, so this always ends at a founder
-        line = [gid]
-        while self.parents[line[-1], 0] >= 0:
-            line.append(int(self.parents[line[-1], 0]))
-        line.reverse()
+        line = self.line_of_descent(gid)
 
         # the pedigree: the whole line, then each step through either parent takes
         # an ancestor one further off it. Counting fitter parents too keeps it to

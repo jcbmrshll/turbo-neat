@@ -342,6 +342,7 @@ code {
 .player { width: 100%; display: flex; flex-direction: column; gap: 6px; }
 .player canvas { width: 100%; align-self: center; display: block; border: 1px solid var(--edge-soft); cursor: pointer; }
 .player-controls button { min-width: 30px; }
+.player.descent canvas { border: none; }
 .player-controls .play { min-width: 34px; }
 /* a test's episode and the network playing it, side by side when there's room */
 .ep-grid { width: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 10px; align-items: start; }
