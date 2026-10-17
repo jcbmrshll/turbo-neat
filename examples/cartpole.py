@@ -1,4 +1,4 @@
-"""Evolve a policy for EvoJAX's cart-pole swing-up task.
+"""Evolve a policy for EvoJAX's cart-pole swing-up environment.
 
 The pole starts hanging below the cart; the policy pushes the cart left or right to
 swing it up and balance it there; running off the end of the track ends the
@@ -64,7 +64,7 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         activation_fns=[act.iden, act.sigmoid, act.tanh, act.relu, act.sin, act.absl],
         # identity on every input
         input_activation_ids=[0 for _ in range(input_size)],
-        # tanh on the output: the task clips the force to [-1, 1]
+        # tanh on the output: the environment clips the force to [-1, 1]
         output_activation_ids=[2 for _ in range(output_size)],
         input_labels=["x", "x_vel", "cos_theta", "sin_theta", "theta_vel"],
         output_labels=["force"],
@@ -107,7 +107,7 @@ def episode_fn(state):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evolve a policy for EvoJAX's cart-pole swing-up task."
+        description="Evolve a policy for EvoJAX's cart-pole swing-up environment."
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=100)
@@ -126,14 +126,14 @@ def main():
     )
     args = parser.parse_args()
 
-    train_task = CartPoleSwingUp(NUM_STEPS, harder=args.harder)
-    test_task = CartPoleSwingUp(NUM_STEPS, harder=args.harder, test=True)
+    train_env = CartPoleSwingUp(NUM_STEPS, harder=args.harder)
+    test_env = CartPoleSwingUp(NUM_STEPS, harder=args.harder, test=True)
 
     neat = NEAT(
-        config=make_config(train_task.obs_shape[0], train_task.act_shape[0]),
+        config=make_config(train_env.obs_shape[0], train_env.act_shape[0]),
         # record every member's first episode for the monitor's lineage view
         fitness_fn=make_fitness_fn(
-            task=train_task,
+            env=train_env,
             num_steps=NUM_STEPS,
             num_episodes=NUM_EPISODES,
             record=args.monitor is not None,
@@ -143,7 +143,7 @@ def main():
         ),
         # every 10th generation's 10 fittest, over 1000 episodes each
         test_fn=make_top_k_test(
-            make_test_fn(task=test_task, num_steps=NUM_STEPS, num_episodes=1000)
+            make_test_fn(env=test_env, num_steps=NUM_STEPS, num_episodes=1000)
         ),
         monitor=Monitor(args.monitor, project="cartpole") if args.monitor else None,
     )

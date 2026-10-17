@@ -58,7 +58,7 @@ def observe(game: Game) -> jax.Array:
 
 class SlimeVolley2p:
     """SlimeVolley with both slimes controlled by the caller, for self-play: a
-    multi-player task of two players, the left slime then the right."""
+    multi-player environment of two players, the left slime then the right."""
 
     num_players = 2
     obs_shape = (12,)
