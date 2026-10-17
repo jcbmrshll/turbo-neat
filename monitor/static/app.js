@@ -1899,7 +1899,7 @@ async function loadDescent(tab, card) {
   if (runId !== state.runId || !state.tabs.includes(tab)) return;
   card.el.hidden = false;
   const info = h("span", { class: "latest" });
-  card.hdr.replaceChildren(h("span", { class: "title", text: "line of descent" }), h("span", { class: "spacer" }), info);
+  card.hdr.replaceChildren(h("span", { class: "title", text: "lineage evolution" }), h("span", { class: "spacer" }), info);
   // (a tab switched away from while this loaded has no width yet)
   const view = descentView(data, (card.body.clientWidth || 720) - 22, { lim });
   const player = episodePlayer(view, { maxHeight: view.height });
