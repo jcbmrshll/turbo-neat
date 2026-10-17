@@ -5,7 +5,6 @@ from typing import Any, Callable, Optional, Protocol, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from evojax.task.base import VectorizedTask
 
 from neat.genome import Genome, forward
 from neat.utils import apply, mask_data
@@ -15,11 +14,11 @@ from neat.utils import apply, mask_data
 @dataclass(frozen=True)
 class Recording:
     """What a fitness evaluation played, for the monitor: one episode per member (or
-    per game, for multi-player tasks).
+    per game, for multi-player environments).
 
-    frames is the task state at every recorded step, with leading (episode, step)
-    axes, and players holds the batch index of each genome playing each episode,
-    shape (episodes, players)."""
+    frames is the environment state at every recorded step, with leading
+    (episode, step) axes, and players holds the batch index of each genome playing
+    each episode, shape (episodes, players)."""
 
     frames: Any
     players: jax.Array
@@ -37,7 +36,8 @@ class Scores:
 
 
 def _episode_major(frames: Any) -> Any:
-    """Task states stacked by lax.scan, (step, episode, ...), as (episode, step, ...)."""
+    """Environment states stacked by lax.scan, (step, episode, ...), as
+    (episode, step, ...)."""
     return jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), frames)
 
 
@@ -59,10 +59,10 @@ def _scan_every(
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class FitnessState:
-    task_state: jax.Array
+    env_state: jax.Array
     # per episode, or per player in each episode
     reward: jax.Array
-    # how many times each episode's task has reset (reported done) while scoring
+    # how many times each episode's environment has reset (reported done) while scoring
     resets: jax.Array
 
 
@@ -89,18 +89,19 @@ def rollout(
 ) -> Tuple[jax.Array, Any]:
     """Play num_envs episodes side by side for num_steps steps, with policy mapping
     their batched observations to actions. Returns each episode's total reward, and
-    keep(task state) every keep_every steps (None without keep), stacked on a
+    keep(environment state) every keep_every steps (None without keep), stacked on a
     leading step axis.
 
     step_fn's rewards are per episode, (num_envs,), or per player in each episode,
-    (num_envs, players) for a multi-player task; the totals keep the same shape.
+    (num_envs, players) for a multi-player environment; the totals keep the same
+    shape.
 
-    Each done the task reports is a reset: the task starts over from a new state.
-    Reward counts until the task has reset more than max_resets times, after which
-    the task state is held where it was, rather than playing on from a new start.
+    Each done the environment reports is a reset: it starts over from a new state.
+    Reward counts until the environment has reset more than max_resets times, after
+    which its state is held where it was, rather than playing on from a new start.
     So 0 scores one episode, like evojax's rollouts; k lets an episode use k extra
-    starts, like lives; None scores straight through every reset, for tasks whose
-    done just starts a new round.
+    starts, like lives; None scores straight through every reset, for environments
+    whose done just starts a new round.
 
     With replicate_rng, every episode resets with the same rng, so starts from the
     same state."""
@@ -110,31 +111,29 @@ def rollout(
         keys = jnp.broadcast_to(rng, (num_envs,) + rng.shape)
     else:
         keys = jax.random.split(rng, num_envs)
-    task_state = reset_fn(keys)
-    rewards = jax.eval_shape(lambda s: step_fn(s, policy(s.obs))[1], task_state)
+    env_state = reset_fn(keys)
+    rewards = jax.eval_shape(lambda s: step_fn(s, policy(s.obs))[1], env_state)
     state = FitnessState(
-        task_state=task_state,
+        env_state=env_state,
         reward=jnp.zeros(rewards.shape, dtype=jnp.float32),
         resets=jnp.zeros(num_envs, dtype=jnp.int32),
     )
 
     def game_step(state):
-        task_state, rewards, done = step_fn(
-            state.task_state, policy(state.task_state.obs)
-        )
-        # the step that resets the task still counts
+        env_state, rewards, done = step_fn(state.env_state, policy(state.env_state.obs))
+        # the step that resets the environment still counts
         counted = state.resets <= limit
         reward = state.reward + mask_data(rewards, 0, counted)
         resets = state.resets + (counted & done.astype(bool))
-        # past the last counted reset, keep the task's last state
-        task_state = _keep_where(resets <= limit, task_state, state.task_state)
-        return FitnessState(task_state=task_state, reward=reward, resets=resets)
+        # past the last counted reset, keep the environment's last state
+        env_state = _keep_where(resets <= limit, env_state, state.env_state)
+        return FitnessState(env_state=env_state, reward=reward, resets=resets)
 
     if keep is None:
         state = jax.lax.fori_loop(0, num_steps, lambda _, s: game_step(s), state)
         return state.reward, None
     state, frames = _scan_every(
-        game_step, state, num_steps, keep_every, lambda s: keep(s.task_state)
+        game_step, state, num_steps, keep_every, lambda s: keep(s.env_state)
     )
     return state.reward, frames
 
@@ -200,8 +199,9 @@ def test(
     **kwargs,
 ) -> Tuple[jax.Array, Any]:
     """Scores one genome: its mean total reward over num_episodes episodes from
-    different starts (see rollout for max_resets), and the task state over the first
-    frames_len steps of the first episode, every frames_every steps, to show it."""
+    different starts (see rollout for max_resets), and the environment state over the
+    first frames_len steps of the first episode, every frames_every steps, to show
+    it."""
 
     def policy(obs):
         return forward(genome, obs, **kwargs)
@@ -220,8 +220,23 @@ def test(
     return rewards.mean(), jax.tree.map(lambda x: x[shown], frames)
 
 
-class MultiPlayerTask(Protocol):
-    """A task where num_players genomes play each game together.
+class Environment(Protocol):
+    """An environment the genomes of a batch each play on their own, like evojax's.
+
+    reset takes a key per episode, (episodes, 2), and returns the state of every
+    episode, whose obs is (episodes, obs_size); step takes actions of
+    (episodes, act_size) and returns the next state, rewards of (episodes,) and
+    whether each episode is done, (episodes,)."""
+
+    def reset(self, key: jax.Array, /) -> Any: ...
+
+    def step(
+        self, state: Any, action: jax.Array, /
+    ) -> Tuple[Any, jax.Array, jax.Array]: ...
+
+
+class MultiPlayerEnvironment(Protocol):
+    """An environment where num_players genomes play each game together.
 
     The state's obs is (games, num_players, obs_size), and step_mp takes actions of
     (games, num_players, act_size) and returns rewards of (games, num_players)."""
@@ -256,11 +271,11 @@ def play_seated(
     record_fn: Optional[Callable] = None,
     **kwargs,
 ) -> Tuple[jax.Array, Any]:
-    """Plays genomes against each other in num_games games of a multi-player task:
-    seated holds the genome in each seat, laid out as (games, seats) and flattened.
-    Returns each seat's total reward over num_steps (see rollout for max_resets),
-    and, if record, every game's task state every record_every steps (or what
-    record_fn keeps of it), with leading (game, step) axes."""
+    """Plays genomes against each other in num_games games of a multi-player
+    environment: seated holds the genome in each seat, laid out as (games, seats)
+    and flattened. Returns each seat's total reward over num_steps (see rollout for
+    max_resets), and, if record, every game's environment state every record_every
+    steps (or what record_fn keeps of it), with leading (game, step) axes."""
 
     def policy(obs):
         return apply_seats(seated, obs, **kwargs)
@@ -273,7 +288,7 @@ def play_seated(
         num_envs=num_games,
         num_steps=num_steps,
         max_resets=max_resets,
-        keep=(record_fn or (lambda task_state: task_state)) if record else None,
+        keep=(record_fn or (lambda env_state: env_state)) if record else None,
         keep_every=record_every,
     )
     return rewards, frames if frames is None else _episode_major(frames)
@@ -388,7 +403,7 @@ def fitness_mp_field(
     """The batch of genomes all playing each other, num_games times: game g seats
     them g seats along from game 0, so that each plays from every seat as often
     (see rollout for max_resets). Returns each genome's mean reward per game, and
-    game 0's task state every record_every steps (or what record_fn keeps of it),
+    game 0's environment state every record_every steps (or what record_fn keeps of it),
     genome i in seat i."""
     num_players = genome.batch_size
     games, seats = np.arange(num_games)[:, None], np.arange(num_players)[None]
@@ -412,22 +427,22 @@ def fitness_mp_field(
 
 
 def make_fitness_fn(
-    task: VectorizedTask,
+    env: Environment,
     num_steps: int,
     num_episodes: int = 1,
     max_resets: Optional[int] = 0,
     record: bool = False,
     replicate_rng: bool = False,
 ) -> Callable:
-    """A training fitness: scores every genome of a population on task (see
+    """A training fitness: scores every genome of a population on env (see
     fitness)."""
     assert num_steps > 0, "num_steps must be greater than 0"
     assert num_episodes > 0, "num_episodes must be greater than 0"
     assert max_resets is None or max_resets >= 0, "max_resets must be at least 0"
     return partial(
         fitness,
-        step_fn=task.step,
-        reset_fn=task.reset,
+        step_fn=env.step,
+        reset_fn=env.reset,
         num_steps=num_steps,
         num_episodes=num_episodes,
         max_resets=max_resets,
@@ -437,14 +452,14 @@ def make_fitness_fn(
 
 
 def make_test_fn(
-    task: VectorizedTask,
+    env: Environment,
     num_steps: int,
     num_episodes: int,
     max_resets: Optional[int] = 0,
     frames_len: Optional[int] = None,
     frames_every: int = 1,
 ) -> Callable:
-    """A test of one genome, e.g. the best of a generation, on task (see test)."""
+    """A test of one genome, e.g. the best of a generation, on env (see test)."""
     assert num_steps > 0, "num_steps must be greater than 0"
     assert num_episodes > 0, "num_episodes must be greater than 0"
     assert max_resets is None or max_resets >= 0, "max_resets must be at least 0"
@@ -452,8 +467,8 @@ def make_test_fn(
         frames_len = num_steps
     return partial(
         test,
-        step_fn=task.step,
-        reset_fn=task.reset,
+        step_fn=env.step,
+        reset_fn=env.reset,
         num_steps=num_steps,
         num_episodes=num_episodes,
         max_resets=max_resets,
@@ -463,7 +478,7 @@ def make_test_fn(
 
 
 def make_mp_fitness_fn(
-    task: MultiPlayerTask,
+    env: MultiPlayerEnvironment,
     steps_per_round: int,
     num_rounds: int,
     max_resets: Optional[int] = 0,
@@ -478,9 +493,9 @@ def make_mp_fitness_fn(
     assert parallel_rounds > 0, "parallel_rounds must be greater than 0"
     return partial(
         fitness_mp,
-        step_fn=task.step_mp,
-        reset_fn=task.reset,
-        num_players=task.num_players,
+        step_fn=env.step_mp,
+        reset_fn=env.reset,
+        num_players=env.num_players,
         steps_per_round=steps_per_round,
         num_rounds=num_rounds,
         max_resets=max_resets,
@@ -492,7 +507,7 @@ def make_mp_fitness_fn(
 
 
 def make_mp_field_fn(
-    task: MultiPlayerTask,
+    env: MultiPlayerEnvironment,
     num_games: int,
     num_steps: int,
     max_resets: Optional[int] = 0,
@@ -504,8 +519,8 @@ def make_mp_field_fn(
     assert max_resets is None or max_resets >= 0, "max_resets must be at least 0"
     return partial(
         fitness_mp_field,
-        step_fn=task.step_mp,
-        reset_fn=task.reset,
+        step_fn=env.step_mp,
+        reset_fn=env.reset,
         num_games=num_games,
         num_steps=num_steps,
         max_resets=max_resets,

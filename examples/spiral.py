@@ -1,10 +1,10 @@
-"""Backprop NEAT on a 2D binary classification problem (two spirals, or XOR).
+"""Backprop NEAT on the two-spirals problem: classify points from two interleaved
+spirals.
 
 Each generation, every genome's weights and biases take a few gradient steps on the
 loss and are scored on fresh data; evolution then searches over topologies.
 
     uv run examples/spiral.py --generations 300
-    uv run examples/spiral.py --dataset xor
     uv run examples/spiral.py --monitor
 
 Start the monitor first with `uv run turbo-neat-monitor`.
@@ -28,18 +28,6 @@ from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
 from neat.testing import make_top_k_test
 
 NUM_POINTS = 1000
-
-# maps (rng) to (points of shape (n, 2), labels of shape (n,))
-DataFn = Callable[[jax.Array], Tuple[jax.Array, jax.Array]]
-
-
-def generate_xor_data(
-    rng: jax.Array, num_points: int, noise: float = 0.5, r: float = 5
-) -> Tuple[jax.Array, jax.Array]:
-    data = jax.random.uniform(rng, (num_points, 2), minval=-r, maxval=r)
-    data += jax.random.normal(rng, (num_points, 2)) * noise
-    labels = jnp.logical_xor(data[:, 0] > 0, data[:, 1] > 0).astype(jnp.float32)
-    return data, labels
 
 
 def generate_spiral_data(
@@ -70,16 +58,13 @@ def generate_spiral_data(
     return data, labels
 
 
-DATASETS = {"spiral": generate_spiral_data, "xor": generate_xor_data}
-
-
 def sigmoid_binary_cross_entropy(logits: jax.Array, labels: jax.Array) -> jax.Array:
     log_p = jax.nn.log_sigmoid(logits)
     log_not_p = jax.nn.log_sigmoid(-logits)
     return -labels * log_p - (1 - labels) * log_not_p
 
 
-def make_backprop_fn(generate: Callable, record: bool = False) -> Callable:
+def make_backprop_fn(record: bool = False) -> Callable:
     """Fitness is the negative loss on a fresh batch; also returns the gradients of
     the loss with respect to each genome's weights and biases, and, if record, a
     Recording of each genome's batch with its predicted probabilities, shaped like
@@ -87,7 +72,9 @@ def make_backprop_fn(generate: Callable, record: bool = False) -> Callable:
 
     def backprop_fn(rng, genome: Genome, **kwargs):
         rng_batch = jax.random.split(rng, genome.batch_size)
-        data, labels = jax.vmap(partial(generate, num_points=NUM_POINTS))(rng_batch)
+        data, labels = jax.vmap(partial(generate_spiral_data, num_points=NUM_POINTS))(
+            rng_batch
+        )
 
         def loss_fn(weights, biases, gen: Genome, data, labels):
             gen = replace(
@@ -110,12 +97,12 @@ def make_backprop_fn(generate: Callable, record: bool = False) -> Callable:
     return backprop_fn
 
 
-def make_test_fn(generate: Callable) -> Callable:
+def make_test_fn() -> Callable:
     """Scores one genome on fresh data, and returns the points with their predicted
     class probabilities, shape (points, 3), for plotting."""
 
     def test_fn(rng, genome: Genome, **kwargs):
-        data, labels = generate(rng, num_points=NUM_POINTS)
+        data, labels = generate_spiral_data(rng, num_points=NUM_POINTS)
         logits = forward(genome, data, **kwargs, diff_mode=False)
         loss = sigmoid_binary_cross_entropy(logits.squeeze(-1), labels).mean()
         return -loss, jnp.concatenate([data, jax.nn.sigmoid(logits)], axis=-1)
@@ -154,9 +141,9 @@ def make_config() -> NEATConfig:
             act.cos,
             act.absl,
         ],
-        input_activation_ids=[0, 0],
+        input_activation=act.iden,
         # the output is a logit
-        output_activation_ids=[0],
+        output_activation=act.iden,
         input_labels=["x", "y"],
         output_labels=["class"],
         capacity_growth_strategy="linear",
@@ -195,9 +182,8 @@ def episode_fn(data):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Backprop NEAT on a 2D binary classification problem."
+        description="Backprop NEAT on the two-spirals problem."
     )
-    parser.add_argument("--dataset", choices=sorted(DATASETS), default="spiral")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=300)
     parser.add_argument(
@@ -210,13 +196,12 @@ def main():
     )
     args = parser.parse_args()
 
-    generate = DATASETS[args.dataset]
     bneat = BackpropNEAT(
         make_config(),
         # record each member's scored batch for the monitor's member view
-        backprop_fn=make_backprop_fn(generate, record=args.monitor is not None),
+        backprop_fn=make_backprop_fn(record=args.monitor is not None),
         # every 10th generation's 10 fittest, on the same fresh data
-        test_fn=make_top_k_test(make_test_fn(generate)),
+        test_fn=make_top_k_test(make_test_fn()),
         monitor=Monitor(args.monitor, project="spiral") if args.monitor else None,
         # each batch is a random draw of the data, so one would be a noisy fitness
         eval_batches=2,

@@ -346,10 +346,16 @@ def init_species_data(maximum_species: int, next_species_id: int = 0) -> Species
     )
 
 
+# which species to remove for not improving: a boolean mask over species. A
+# species' stagnation is how many generations it has gone without its fitness EMA
+# setting a new best, counted once it is fitness_ema_period generations old
 StagnationFn = Callable[[SpeciesData], jax.Array]
 
 
 def make_improvement_stagnation_fn(max_stagnated_steps: int) -> StagnationFn:
+    """Removes every species that hasn't set a new best in max_stagnated_steps
+    generations."""
+
     def stagnated(species_data: SpeciesData) -> jax.Array:
         return species_data.stagnation >= max_stagnated_steps
 
@@ -357,6 +363,9 @@ def make_improvement_stagnation_fn(max_stagnated_steps: int) -> StagnationFn:
 
 
 def make_relative_fitness_stagnation_fn(minimum_stagnation: int) -> StagnationFn:
+    """Removes every species that hasn't set a new best in minimum_stagnation
+    generations and whose fitness is below the mean of all species'."""
+
     def stagnated(species_data: SpeciesData) -> jax.Array:
         fitness_mean = jnp.mean(species_data.ema_fitness, where=species_data.mask)
         return (species_data.stagnation >= minimum_stagnation) & (
@@ -369,6 +378,10 @@ def make_relative_fitness_stagnation_fn(minimum_stagnation: int) -> StagnationFn
 def make_remove_last_if_stagnant_and_full_stagnation_fn(
     max_stagnated_steps: int, full_target: int
 ) -> StagnationFn:
+    """Once there are at least full_target species, removes the least fit one if
+    it hasn't set a new best in max_stagnated_steps generations: a steady turnover
+    of species, one at a time."""
+
     def stagnated(species_data: SpeciesData) -> jax.Array:
         min_ema = jnp.min(
             species_data.ema_fitness, where=species_data.mask, initial=jnp.inf

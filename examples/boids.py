@@ -1,4 +1,4 @@
-"""Evolve a flocking policy for EvoJAX's boids task.
+"""Evolve a flocking policy for EvoJAX's boids environment.
 
     uv run examples/boids.py --generations 100
     uv run examples/boids.py --monitor
@@ -62,10 +62,8 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         init_weight_mean=0.0,
         init_weight_std=1.0,
         activation_fns=[act.iden, act.sigmoid, act.tanh, act.relu],
-        # identity on every input
-        input_activation_ids=[0 for _ in range(input_size)],
-        # tanh on every output
-        output_activation_ids=[2 for _ in range(output_size)],
+        input_activation=act.iden,
+        output_activation=act.tanh,
         input_labels=[get_input_label(i) for i in range(input_size)],
         output_labels=[get_output_label(i) for i in range(output_size)],
         capacity_growth_strategy="linear",
@@ -82,8 +80,6 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         max_transfer_age=1,
         maximum_species=5,
         selection_tournament_size=8,
-        min_species_size=0,
-        species_warmup_threshold=1,
     )
 
     return NEATConfig(
@@ -103,7 +99,7 @@ def episode_fn(state):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evolve a flocking policy for EvoJAX's boids task."
+        description="Evolve a flocking policy for EvoJAX's boids environment."
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=100)
@@ -117,14 +113,14 @@ def main():
     )
     args = parser.parse_args()
 
-    train_task = FlockingTask(NUM_STEPS, action_type=1)
-    test_task = FlockingTask(NUM_STEPS, action_type=1)
+    train_env = FlockingTask(NUM_STEPS, action_type=1)
+    test_env = FlockingTask(NUM_STEPS, action_type=1)
 
     neat = NEAT(
-        config=make_config(train_task.obs_shape[0], train_task.act_shape[0]),
+        config=make_config(train_env.obs_shape[0], train_env.act_shape[0]),
         # record every member's episode for the monitor's lineage view
         fitness_fn=make_fitness_fn(
-            task=train_task,
+            env=train_env,
             num_steps=NUM_STEPS,
             num_episodes=NUM_EPISODES,
             record=args.monitor is not None,
@@ -134,7 +130,7 @@ def main():
         ),
         # every 10th generation's 10 fittest, over 100 episodes each
         test_fn=make_top_k_test(
-            make_test_fn(task=test_task, num_steps=NUM_STEPS, num_episodes=100)
+            make_test_fn(env=test_env, num_steps=NUM_STEPS, num_episodes=100)
         ),
         monitor=Monitor(args.monitor, project="boids") if args.monitor else None,
     )

@@ -289,8 +289,15 @@ class RunStore:
             **arrays,
             input_size=genome_config["input_size"],
             output_size=genome_config["output_size"],
-            # the config was logged with each activation function by name
-            activation_names=dict(enumerate(genome_config.get("activation_fns", []))),
+            # the config was logged with each activation function by name; runs from
+            # before input and output activations were given as functions have no
+            # activations, and their ids index activation_fns
+            activation_names=dict(
+                enumerate(
+                    genome_config.get("activations")
+                    or genome_config.get("activation_fns", [])
+                )
+            ),
             input_labels=genome_config.get("input_labels"),
             output_labels=genome_config.get("output_labels"),
         )

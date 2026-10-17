@@ -66,7 +66,7 @@ class Lineage:
         self.species = np.full(0, -1, dtype=np.int32)
         self.fitness = np.full(0, np.nan, dtype=np.float64)
         self.best = np.full(0, np.nan, dtype=np.float64)
-        self.children = np.zeros(0, dtype=np.int32)
+        self.offspring = np.zeros(0, dtype=np.int32)
 
     # ------------------------------------------------------------ indexing
 
@@ -102,7 +102,7 @@ class Lineage:
         self.species = pad(self.species, -1)
         self.fitness = pad(self.fitness, np.nan)
         self.best = pad(self.best, np.nan)
-        self.children = pad(self.children, 0)
+        self.offspring = pad(self.offspring, 0)
 
     def _add(self, row: Dict[str, Any]) -> None:
         step = int(row["step"])
@@ -123,8 +123,8 @@ class Lineage:
         self.birth_species[newborn] = species[is_new]
         # a mate that is also the fitter parent is one parent, not two
         primary, mate = parents[is_new, 0], parents[is_new, 1]
-        np.add.at(self.children, primary[primary >= 0], 1)
-        np.add.at(self.children, mate[(mate >= 0) & (mate != primary)], 1)
+        np.add.at(self.offspring, primary[primary >= 0], 1)
+        np.add.at(self.offspring, mate[(mate >= 0) & (mate != primary)], 1)
 
         self.last[ids] = step
         self.species[ids] = species
@@ -160,7 +160,7 @@ class Lineage:
             "age": int(self.last[gid] - self.born[gid] + 1),
             "fitness": _num(self.fitness[gid]),
             "best": _num(self.best[gid]),
-            "children": int(self.children[gid]),
+            "offspring": int(self.offspring[gid]),
             "parents": [int(p) for p in self.parents[gid]],
         }
 
@@ -192,9 +192,9 @@ class Lineage:
 
     def as_of(self, gen: Generation) -> Tuple[np.ndarray, ...]:
         """Every genome's fitness, species and last epoch as of generation `gen`, as
-        last seen up to then, and how many children it had by then."""
+        last seen up to then, and how many offspring it had by then."""
         if gen is self.latest:
-            return self.fitness, self.species, self.last, self.children
+            return self.fitness, self.species, self.last, self.offspring
         n = len(self.born)
         fitness = np.full(n, np.nan)
         species = np.full(n, -1, dtype=np.int32)
@@ -203,12 +203,12 @@ class Lineage:
             fitness[g.ids] = g.fitness
             species[g.ids] = g.species
             last[g.ids] = g.step
-        children = np.zeros(n, dtype=np.int32)
+        offspring = np.zeros(n, dtype=np.int32)
         born = (self.born >= 0) & (self.born <= gen.step)
         primary, mate = self.parents[born, 0], self.parents[born, 1]
-        np.add.at(children, primary[primary >= 0], 1)
-        np.add.at(children, mate[(mate >= 0) & (mate != primary)], 1)
-        return fitness, species, last, children
+        np.add.at(offspring, primary[primary >= 0], 1)
+        np.add.at(offspring, mate[(mate >= 0) & (mate != primary)], 1)
+        return fitness, species, last, offspring
 
     def leaderboard(
         self,
@@ -232,7 +232,7 @@ class Lineage:
             ids = np.flatnonzero((self.born >= 0) & (self.born <= gen.step))
         else:
             raise ValueError("scope must be alive or all")
-        fitness, species_of, last, children = self.as_of(gen)
+        fitness, species_of, last, offspring = self.as_of(gen)
         # a genome's species is the one it was in when last seen
         present, counts = np.unique(species_of[ids], return_counts=True)
         if species is not None:
@@ -252,7 +252,7 @@ class Lineage:
                 "alive": seen == gen.step,
                 "age": seen - born + 1,
                 "fitness": _num(fitness[gid]),
-                "children": int(children[gid]),
+                "offspring": int(offspring[gid]),
             }
 
         return {
@@ -274,7 +274,7 @@ class Lineage:
         latest = self.generations[-1]
         desc = np.zeros(len(self.born), dtype=bool)
         desc[gid] = True
-        # parents are born before their children, so one pass forward in time
+        # parents are born before their offspring, so one pass forward in time
         # reaches every descendant
         for gen in self.generations[self.gen_index[int(self.born[gid])] + 1 :]:
             if not gen.newborn.size:
@@ -287,7 +287,7 @@ class Lineage:
 
     def individual(self, gid: int) -> Dict[str, Any]:
         """Everything the lineage view shows about one genome: its record, its own
-        fitness history, its children, and its pedigree: its line of descent back
+        fitness history, its offspring, and its pedigree: its line of descent back
         to a founder, and the ancestors up to PEDIGREE_REACH parents off it."""
         if not self.known(gid):
             raise KeyError(gid)
@@ -321,11 +321,11 @@ class Lineage:
             node["on_line"] = r == 0
             pedigree.append(node)
 
-        child_ids = np.flatnonzero(
+        offspring_ids = np.flatnonzero(
             (self.parents[:, 0] == gid) | (self.parents[:, 1] == gid)
         )
-        children = sorted(
-            (self.summary(int(c)) for c in child_ids),
+        offspring = sorted(
+            (self.summary(int(c)) for c in offspring_ids),
             key=lambda c: -np.inf if c["best"] is None else c["best"],
             reverse=True,
         )
@@ -337,6 +337,6 @@ class Lineage:
             "history": self.history(gid),
             "descendants": self.living_descendants(gid),
             "pedigree": pedigree,
-            "child_list": children[:60],
+            "offspring_list": offspring[:60],
             "species_names": self.species_names(),
         }

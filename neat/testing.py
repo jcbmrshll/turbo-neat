@@ -1,5 +1,6 @@
 """Periodic tests of a population, run every few generations to see how good its
-best members really are: training fitness on a noisy task is mostly luck at the top.
+best members really are: training fitness on a noisy environment is mostly luck at
+the top.
 
 NEAT takes a population test, called with keyword arguments (rng, genome,
 activation_selector), where genome is the generation's evaluated population (with
