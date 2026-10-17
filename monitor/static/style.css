@@ -211,6 +211,7 @@ code {
   grid-template-columns: 1fr;
   gap: 10px;
 }
+.media-grid:not(:empty) { margin-top: 22px; }
 .media-card { display: flex; flex-direction: column; }
 .media-body {
   flex: 1;

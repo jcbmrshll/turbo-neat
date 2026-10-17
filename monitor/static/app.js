@@ -266,7 +266,6 @@ async function select(runId) {
     overview: h("div", { class: "tab-panel" }),
     panels: h("div"),
     tiles: h("div", { class: "tiles" }),
-    mediaTitle: h("div", { class: "stitle", text: "Media" }),
     media: h("div", { class: "media-grid" }),
     chartsTitle: h("div", { class: "stitle-row" }),
     charts: h("div", { class: "chart-grid" }),
@@ -276,7 +275,6 @@ async function select(runId) {
   };
   view.overview.append(
     view.tiles,
-    view.mediaTitle,
     view.media,
     view.chartsTitle,
     view.charts,
@@ -796,7 +794,6 @@ function mediaByKey() {
 
 function renderMedia() {
   const groups = mediaByKey();
-  view.mediaTitle.hidden = !groups.some(([key]) => !CHART_MEDIA.includes(key));
   for (const [key, entries] of groups) {
     let card = view.mediaCards[key];
     if (!card) {
