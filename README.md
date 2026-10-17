@@ -154,8 +154,9 @@ Swing a pole up from hanging below a cart and balance it, by pushing the cart le
 ![Cartpole](assets/examples/cartpole.webp)
 
 ```sh
-# --harder: random starts, anywhere on the track, already moving, the pole anywhere
-#   in its lower half (leave it out to start near the center, hanging still)
+# cartpole also takes:
+#   --harder  random starts: anywhere on the track, already moving, the pole anywhere
+#             in its lower half (leave it out to start near the center, hanging still)
 uv run examples/cartpole.py --generations 100 --seed 0 --harder --monitor
 ```
 
@@ -188,11 +189,23 @@ Cars race each other around a track from [f1tenth_gym_jax](https://github.com/f1
 ![F1TENTH racing](assets/examples/f1tenth.webp)
 
 ```sh
-# --cars:       cars in each race (11 by default)
-# --map:        the track, by name from f1tenth_racetracks (downloaded on first use)
-# --test:       every 10th generation, the fittest race each other (field), or
-#   each races pure-pursuit bots that follow the centerline (bots)
-# --population: genomes in the population; lower it for a smaller GPU
+# f1tenth also takes:
+#   --cars             cars in each race (11 by default)
+#   --map              the track, by name from f1tenth_racetracks (downloaded on
+#                      first use; Spielberg by default)
+#   --population       genomes in the population (1500 by default); lower it for a
+#                      smaller GPU
+#   --rounds           races each genome runs per generation
+#   --parallel-rounds  rounds raced side by side; raise it until the GPU is busy
+#   --race-seconds     how long each race lasts
+#   --max-speed        the cars' top speed in m/s
+#   --grid-spacing     metres between places on the starting grid
+#   --test             every --test-every generations, the fittest race each other
+#                      (field), or each races pure-pursuit bots that follow the
+#                      centerline (bots)
+#   --test-every       generations between tests
+#   --field-races      races in each test
+#   --test-seconds     how long the test races (the ones the dashboard shows) last
 # self-play takes a few hundred generations to get going, and 1000 take about
 #   5.5 hours on an RTX 5080
 uv run examples/f1tenth.py --generations 1000 --seed 0 --monitor
