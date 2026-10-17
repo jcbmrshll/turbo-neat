@@ -960,7 +960,7 @@ function playerLine(key, entry) {
   }
   const seat = key === "episode" ? BASELINE_SEAT[entry.env] : undefined;
   if (seat === undefined) {
-    return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "seat", text: "best tested" }), swatch(p.birth_species), name))];
+    return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, swatch(p.birth_species), name))];
   }
   const sides = [seatPlayer(name, seat, entry.env), seatPlayer(h("span", { text: "baseline" }), 1 - seat, entry.env)];
   if (seat === 1) sides.reverse();
