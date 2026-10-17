@@ -48,6 +48,10 @@ from monitor.networks import describe_network, unpack_network
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# the most ancestors a line of descent shows, and how many lines are kept once read
+LINE_NETWORKS = 150
+LINE_CACHE = 32
+
 # content types the server accepts as media, and the extension each is stored under
 MEDIA_TYPES = {
     "image/png": "png",
@@ -83,6 +87,8 @@ class RunStore:
         self.lineages: Dict[str, Lineage] = {}
         # run id -> its latest mean fitness, for runs whose meta doesn't keep it
         self.mean_fitness: Dict[str, Optional[float]] = {}
+        # (run id, genome id) -> its line of descent's networks, the oldest first out
+        self.line_cache: Dict[Any, Dict[str, Any]] = {}
 
     def _dir(self, run_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
@@ -303,6 +309,106 @@ class RunStore:
         )
         return {**network, "step": step}
 
+    def line_networks(self, run_id: str, genome_id: int) -> Dict[str, Any]:
+        """A member's line of descent (monitor.lineage line_of_descent) with each
+        ancestor's network as it was born: every ancestor whose structure changed,
+        then evenly spaced others, at most LINE_NETWORKS of them. A line never
+        changes, so it's kept once read."""
+        key = (run_id, genome_id)
+        if key in self.line_cache:
+            return self.line_cache[key]
+        run_dir = self._dir(run_id)
+        lineage = self.lineage(run_id)
+        with lineage.lock:
+            if not lineage.known(genome_id):
+                raise KeyError(genome_id)
+            line = lineage.line_of_descent(genome_id)
+            born = [int(lineage.born[a]) for a in line]
+            fitness = [lineage.fitness_at_birth(a) for a in line]
+            names = [alias(a, int(lineage.birth_species[a])) for a in line]
+
+        # which ancestors have a network logged, and its size: a change of size is
+        # a change of structure. Reading only these small arrays keeps a line
+        # through a 1000-epoch run cheap; the networks themselves are read for
+        # the ancestors shown
+        sizes: Dict[int, Any] = {}
+        for i, (gid, step) in enumerate(zip(line, born)):
+            path = run_dir / "networks" / f"{step}.npz"
+            if not path.exists():
+                continue
+            with np.load(path, allow_pickle=False) as npz:
+                where = np.flatnonzero(npz["ids"] == gid)
+                if where.size:
+                    row = int(where[0])
+                    sizes[i] = (
+                        int(npz["num_connections"][row]),
+                        int(npz["num_nodes"][row]),
+                    )
+        logged = sorted(sizes)
+        changed = [
+            i
+            for j, i in enumerate(logged)
+            if j == 0 or sizes[i] != sizes[logged[j - 1]]
+        ]
+        shown = _pick(logged, set(changed + logged[-1:]), LINE_NETWORKS)
+
+        genome_config = self._read_meta(run_dir)["config"].get("genome_config", {})
+        networks = []
+        for i in shown:
+            with np.load(
+                run_dir / "networks" / f"{born[i]}.npz", allow_pickle=False
+            ) as npz:
+                arrays = unpack_network(npz, line[i])
+            if arrays is None:
+                continue
+            edges = list(
+                zip(
+                    arrays["from_nodes"].tolist(),
+                    arrays["to_nodes"].tolist(),
+                    arrays["weights"].astype(np.float64).round(5).tolist(),
+                )
+            )
+            num_io = genome_config["input_size"] + genome_config["output_size"]
+            used = sorted(set(range(num_io)) | {n for e in edges for n in e[:2]})
+            networks.append(
+                {
+                    "index": i,
+                    "edges": edges,
+                    # [id, activation, bias] of the nodes drawn: the inputs and
+                    # outputs, and hidden nodes on an edge
+                    "nodes": [
+                        [
+                            n,
+                            int(arrays["activation_ids"][n]),
+                            round(float(arrays["biases"][n]), 5),
+                        ]
+                        for n in used
+                    ],
+                }
+            )
+        result = {
+            "id": genome_id,
+            "line": [
+                {"id": a, "name": n, "born": b, "fitness": f}
+                for a, n, b, f in zip(line, names, born, fitness)
+            ],
+            "networks": networks,
+            "input_size": genome_config["input_size"],
+            "output_size": genome_config["output_size"],
+            "input_labels": genome_config.get("input_labels"),
+            "output_labels": genome_config.get("output_labels"),
+            # as in network(): by name, or for older runs, activation_fns
+            "activations": genome_config.get("activations")
+            or genome_config.get("activation_fns", []),
+        }
+        # the member's own network can come in after its generation's members do
+        if networks and networks[-1]["index"] == len(line) - 1:
+            with self.lock:
+                if len(self.line_cache) >= LINE_CACHE:
+                    self.line_cache.pop(next(iter(self.line_cache)))
+                self.line_cache[key] = result
+        return result
+
     def save_member_episodes(
         self, run_id: str, step: int, env: str, data: bytes
     ) -> None:
@@ -505,6 +611,24 @@ class RunStore:
         return path
 
 
+def _pick(items: List[int], preferred: set, most: int) -> List[int]:
+    """At most `most` of items, in order: the preferred ones, then evenly spaced
+    others; or if there are too many preferred, evenly spaced ones of them, the
+    first and last always among them."""
+
+    def spaced(xs: List[int], n: int) -> set:
+        return (
+            {xs[int(j)] for j in np.linspace(0, len(xs) - 1, n)}
+            if n > 0 and xs
+            else set()
+        )
+
+    if len(preferred) > most:
+        return sorted(spaced(sorted(preferred), most))
+    rest = [i for i in items if i not in preferred]
+    return sorted(preferred | spaced(rest, min(most - len(preferred), len(rest))))
+
+
 def _with_reward(player: Dict[str, Any], rewards: Any, *index: int) -> Dict[str, Any]:
     """player, with its reward from rewards[index] if there are rewards."""
     if rewards is None:
@@ -629,6 +753,20 @@ class Handler(BaseHTTPRequestHandler):
                         self._error(HTTPStatus.NOT_FOUND, "no network logged for it")
                         return
                     self._json(network)
+                case [
+                    "api",
+                    "runs",
+                    run_id,
+                    "individuals",
+                    genome_id,
+                    "lineage_networks",
+                ]:
+                    try:
+                        line = self.store.line_networks(run_id, int(genome_id))
+                    except KeyError:
+                        self._error(HTTPStatus.NOT_FOUND, "no such individual")
+                        return
+                    self._json(line)
                 case ["api", "runs", run_id, "individuals", genome_id, "episodes"]:
                     step = query.get("step", [None])[0]
                     try:
