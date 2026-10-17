@@ -3,6 +3,7 @@
 // No framework; every view is plain DOM built with h(), and labels that come
 // from a run (metric names, config values) only ever go in as text.
 
+import { descentView } from "./descent.js";
 import { h } from "./dom.js";
 import { NdArray, loadArrays, episodePlayer, traceNetwork } from "./episodes.js";
 import { BLUE, ORANGE, WELL } from "./palette.js";
@@ -1670,6 +1671,7 @@ function renderMember(tab) {
       tiles,
       h("div", { class: "lineage-grid" }, cards.network.el, cards.episode.el),
       pedigree,
+      cards.descent.el,
       offspring,
     ].filter(Boolean),
   );
@@ -1682,9 +1684,9 @@ function renderMember(tab) {
   });
 }
 
-// the member's network and episodes, in the generation tab.step. Made once per
-// tab and kept across redraws, so an episode that's playing isn't restarted by
-// every new generation; hidden for runs that didn't log them
+// the member's network and episodes, in the generation tab.step, and its line of
+// descent. Made once per tab and kept across redraws, so an episode that's playing
+// isn't restarted by every new generation; hidden for runs that didn't log them
 function memberCards(tab) {
   if (tab.cards) return tab.cards;
   const card = () => {
@@ -1693,13 +1695,14 @@ function memberCards(tab) {
     c.el.hidden = true;
     return c;
   };
-  tab.cards = { network: card(), episode: card() };
+  tab.cards = { network: card(), episode: card(), descent: card() };
   return tab.cards;
 }
 
 function loadMemberCards(tab) {
   loadNetwork(tab, tab.cards.network);
   loadEpisodes(tab, tab.cards.episode);
+  loadDescent(tab, tab.cards.descent);
 }
 
 // the member's network or episodes ("network" or "episodes") in tab.step: null
@@ -1862,6 +1865,56 @@ async function loadEpisodes(tab, card) {
   };
   card.body.replaceChildren(card.player.el);
   linkMember(tab);
+}
+
+// The member's line of descent, each ancestor's network blended into the next, and
+// for a 2D classification, the decision boundary it drew. A line never changes, so
+// it's drawn once per tab
+async function loadDescent(tab, card) {
+  if (card.shown) return;
+  card.shown = true;
+  const runId = state.runId;
+  let data = null;
+  try {
+    data = await api(`/api/runs/${runId}/individuals/${tab.id}/lineage_networks`);
+  } catch {
+    // not logged (or not yet)
+  }
+  if (runId !== state.runId || !state.tabs.includes(tab)) return;
+  if (!data?.networks.length) {
+    card.shown = false;
+    return;
+  }
+  // the boundary over the plane the member's episode covers
+  let lim = null;
+  const eps = await memberData(tab, "episodes");
+  if (eps?.env === "classification_2d" && eps.episodes.length) {
+    try {
+      const { points } = await loadArrays(`/api/runs/${runId}/member_episodes/${eps.step}/${eps.episodes[0].index}`);
+      lim = 1.02 * points.data.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+    } catch {
+      // drawn without it
+    }
+  }
+  if (runId !== state.runId || !state.tabs.includes(tab)) return;
+  card.el.hidden = false;
+  const info = h("span", { class: "latest" });
+  card.hdr.replaceChildren(h("span", { class: "title", text: "line of descent" }), h("span", { class: "spacer" }), info);
+  // (a tab switched away from while this loaded has no width yet)
+  const view = descentView(data, (card.body.clientWidth || 720) - 22, { lim });
+  const player = episodePlayer(view, { maxHeight: view.height });
+  player.el.classList.add("descent");
+  // the ancestor shown, named in the header
+  let named = null;
+  player.onFrame = (frame) => {
+    const { ancestor: a, hidden, connections } = view.at(frame);
+    if (a === named) return;
+    named = a;
+    const who = a.id === tab.id ? h("b", {}, nameEl(a.name)) : genomeLink(a.id, a.name);
+    info.replaceChildren(who, ` · generation ${a.born} · fitness ${fmt(a.fitness)} · ${hidden} hidden · ${connections} connections`);
+  };
+  player.onFrame(player.frame);
+  card.body.replaceChildren(player.el);
 }
 
 // both tournaments picked the same parent, so its offspring is a mutated copy of it

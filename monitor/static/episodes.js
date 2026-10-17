@@ -64,12 +64,13 @@ document.addEventListener("keydown", (ev) => {
 // is over it. player.onFrame(frame) is called with every frame drawn, and
 // player.onSeat(seat) when the reader clicks an agent other than the one picked
 // out (`seat`, to begin with), for views that can say which is where: true if it
-// did something with it.
-export function episodePlayer(view, { seat = null } = {}) {
+// did something with it. A view can count its frames its own way, counter(frame),
+// and say where the arrow keys go from a frame, step(frame, ±1).
+export function episodePlayer(view, { seat = null, maxHeight = MAX_HEIGHT } = {}) {
   const canvas = h("canvas");
   canvas.style.aspectRatio = `${view.width} / ${view.height}`;
-  // no taller than MAX_HEIGHT on screen
-  canvas.style.maxWidth = `${(MAX_HEIGHT * view.width) / view.height}px`;
+  // no taller than maxHeight on screen
+  canvas.style.maxWidth = `${(maxHeight * view.width) / view.height}px`;
   const ctx = canvas.getContext("2d");
   const still = view.frames <= 1;
   const playBtn = h("button", { class: "play", title: "play/pause (space)" });
@@ -89,7 +90,7 @@ export function episodePlayer(view, { seat = null } = {}) {
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     view.draw(ctx, player.frame, { seat: player.seat });
     scrub.value = player.frame;
-    counter.textContent = `${player.frame + 1}/${view.frames}`;
+    counter.textContent = view.counter ? view.counter(player.frame) : `${player.frame + 1}/${view.frames}`;
     player.onFrame?.(player.frame);
   }
 
@@ -183,7 +184,8 @@ export function episodePlayer(view, { seat = null } = {}) {
     if (key === " ") setPlaying(!player.playing);
     else if (key === "ArrowRight" || key === "ArrowLeft") {
       setPlaying(false);
-      player.setFrame(player.frame + (key === "ArrowRight" ? 1 : -1));
+      const dir = key === "ArrowRight" ? 1 : -1;
+      player.setFrame(view.step ? view.step(player.frame, dir) : player.frame + dir);
     } else return false;
     return true;
   };
