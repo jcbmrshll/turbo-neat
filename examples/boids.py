@@ -62,10 +62,8 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         init_weight_mean=0.0,
         init_weight_std=1.0,
         activation_fns=[act.iden, act.sigmoid, act.tanh, act.relu],
-        # identity on every input
-        input_activation_ids=[0 for _ in range(input_size)],
-        # tanh on every output
-        output_activation_ids=[2 for _ in range(output_size)],
+        input_activation=act.iden,
+        output_activation=act.tanh,
         input_labels=[get_input_label(i) for i in range(input_size)],
         output_labels=[get_output_label(i) for i in range(output_size)],
         capacity_growth_strategy="linear",
@@ -82,8 +80,6 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         max_transfer_age=1,
         maximum_species=5,
         selection_tournament_size=8,
-        min_species_size=0,
-        species_warmup_threshold=1,
     )
 
     return NEATConfig(

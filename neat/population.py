@@ -297,8 +297,11 @@ def allocate_offspring(
     norm_fitness = (population.species_data.ema_fitness - ema_min) / (
         ema_max - ema_min + jnp.finfo(jnp.float32).eps
     )
-    offspring_proportion = jax.nn.softmax(norm_fitness, where=species_mask)
-    # add any leftover evenly to masked species (this happens when every species is warming up)
+    # each species' share of the next generation; a lower temperature favors the
+    # fittest species more
+    offspring_proportion = jax.nn.softmax(
+        norm_fitness / selection_config.offspring_temperature, where=species_mask
+    )
     offspring_counts_float = offspring_proportion * selection_config.population_size
     offspring_counts_rounded = round_to_integers(
         offspring_counts_float, selection_config.population_size
@@ -350,13 +353,9 @@ def select_parents(
         ]
     )
 
-    probs = (
-        mask[offspring_species_idxs]
-        * population.species_data.species_size[offspring_species_idxs]
-    ) / (
-        population.species_data.species_size[offspring_species_idxs]
-        * mask[offspring_species_idxs]
-    ).sum(axis=-1)
+    # each offspring draws its parents uniformly from its species' eligible members
+    eligible = mask[offspring_species_idxs]
+    probs = eligible / eligible.sum(axis=-1, keepdims=True)
     rng1, rng2 = jax.random.split(rng)
     rng1 = jax.random.split(rng1, population.batched_genome.batch_size)
     rng2 = jax.random.split(rng2, population.batched_genome.batch_size)

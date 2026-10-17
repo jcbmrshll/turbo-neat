@@ -1363,7 +1363,7 @@ function renderBoard() {
       h("td", { class: "num", text: fmt(r.fitness) }),
       allTime && h("td", { class: "num", text: r.born }),
       h("td", { class: "num", text: r.age }),
-      h("td", { class: "num", text: r.children }),
+      h("td", { class: "num", text: r.offspring }),
     ),
   );
   if (!rows.length) {
@@ -1562,7 +1562,7 @@ function renderMember(tab) {
       : h(
           "span",
           {},
-          "child of ",
+          "offspring of ",
           genomeLink(parent, nameOf(parent)),
           mate >= 0 && mate !== parent && [" × ", genomeLink(mate, nameOf(mate))],
         );
@@ -1614,7 +1614,7 @@ function renderMember(tab) {
     { class: "tiles" },
     fitness,
     tile(`epochs alive · ${ind.age}`, ind.last > ind.born ? `${ind.born}–${ind.last}` : `${ind.born}`),
-    tile("children", ind.children),
+    tile("offspring", ind.offspring),
     tile("living descendants", `${ind.descendants}${share}`),
   );
 
@@ -1648,18 +1648,18 @@ function renderMember(tab) {
   if (tab.step == null) tab.step = ind.last;
   const cards = memberCards(tab);
 
-  const kids = ind.child_list;
-  const children =
+  const kids = ind.offspring_list;
+  const offspring =
     kids.length > 0 &&
     h(
       "div",
       { class: "card" },
-      h("div", { class: "card-hdr" }, h("span", { class: "title", text: `children · ${ind.children}, fittest first` })),
+      h("div", { class: "card-hdr" }, h("span", { class: "title", text: `offspring · ${ind.offspring}, fittest first` })),
       h(
         "div",
         { class: "chips" },
         kids.map((c) => h("span", { class: `chip${c.alive ? "" : " gone"}` }, swatch(c.birth_species), genomeLink(c.id, c.name), h("span", { class: "dim", text: fmt(c.best) }))),
-        ind.children > kids.length && h("span", { class: "dim", text: `and ${ind.children - kids.length} more` }),
+        ind.offspring > kids.length && h("span", { class: "dim", text: `and ${ind.offspring - kids.length} more` }),
       ),
     );
 
@@ -1670,7 +1670,7 @@ function renderMember(tab) {
       tiles,
       h("div", { class: "lineage-grid" }, cards.network.el, cards.episode.el),
       pedigree,
-      children,
+      offspring,
     ].filter(Boolean),
   );
   if (tab.id === state.activeTab) main.scrollTop = scrolled;
@@ -1887,7 +1887,7 @@ function pedigreeView(ind, width) {
   const W = Math.max(width, PADX * 2 + (steps.length - 1) * COL);
   const colX = (i) => (steps.length === 1 ? W / 2 : PADX + (i * (W - 2 * PADX)) / (steps.length - 1));
 
-  // newest first, so each column can line up behind the children it already placed
+  // newest first, so each column can line up behind the offspring it already placed
   for (let i = steps.length - 1; i >= 0; i--) {
     const col = [...nodes.values()].filter((n) => n.born === steps[i]);
     for (const n of col) {
@@ -1895,7 +1895,7 @@ function pedigreeView(ind, width) {
       n.bary = ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : 0;
     }
     // the line keeps its row in every column; the rest are split evenly above and
-    // below it, in the order of their children's heights
+    // below it, in the order of their offspring's heights
     col.sort((a, b) => a.bary - b.bary || a.id - b.id);
     const rest = col.filter((n) => !n.on_line);
     const above = rest.slice(0, rest.length >> 1), below = rest.slice(rest.length >> 1);
@@ -1949,7 +1949,7 @@ function pedigreeView(ind, width) {
         ev.clientY,
         h("div", { class: "head", text: n.name }),
         h("div", { class: "row" }, `#${n.id} · ${n.species_name} · generation ${n.born} · ${n.last > n.born ? `epochs ${n.born}–${n.last}` : `epoch ${n.born}`}`),
-        h("div", { class: "row" }, "best ", h("b", { text: fmt(n.best) }), ` · ${n.children} children`),
+        h("div", { class: "row" }, "best ", h("b", { text: fmt(n.best) }), ` · ${n.offspring} offspring`),
         selfCross(n) && h("div", { class: "row" }, "self-cross"),
       );
     });

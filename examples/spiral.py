@@ -141,9 +141,9 @@ def make_config() -> NEATConfig:
             act.cos,
             act.absl,
         ],
-        input_activation_ids=[0, 0],
+        input_activation=act.iden,
         # the output is a logit
-        output_activation_ids=[0],
+        output_activation=act.iden,
         input_labels=["x", "y"],
         output_labels=["class"],
         capacity_growth_strategy="linear",

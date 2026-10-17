@@ -132,10 +132,8 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         init_weight_mean=0.0,
         init_weight_std=6.7,
         activation_fns=[act.iden, act.sigmoid, act.tanh, act.relu, act.inv, act.exp],
-        # identity on every input
-        input_activation_ids=[0 for _ in range(input_size)],
-        # tanh on every output
-        output_activation_ids=[2 for _ in range(output_size)],
+        input_activation=act.iden,
+        output_activation=act.tanh,
         input_labels=[
             "agent_x",
             "agent_y",
@@ -167,9 +165,6 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         maximum_species=5,
         selection_tournament_size=5,
         fitness_ema_period=5,
-        offspring_temperature=0.65,
-        min_species_size=25,
-        species_warmup_threshold=5,
     )
 
     return NEATConfig(

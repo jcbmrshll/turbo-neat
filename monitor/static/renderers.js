@@ -179,7 +179,7 @@ function slimevolley({ ball, left, right }) {
 
 // ---------------------------------------------------------------- cartpole
 
-// evojax's cart-pole, in world units: the cart's track is x in [-2.4, 2.4], and the
+// evojax's cartpole, in world units: the cart's track is x in [-2.4, 2.4], and the
 // pole is 0.6 long and upright at theta = 0
 const CART_X_LIMIT = 2.4, POLE_LEN = 0.6;
 const CART_W = 0.4, CART_H = 0.2, WHEEL_R = 0.05;

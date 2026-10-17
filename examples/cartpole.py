@@ -1,4 +1,4 @@
-"""Evolve a policy for EvoJAX's cart-pole swing-up environment.
+"""Evolve a policy for EvoJAX's cartpole swing-up environment.
 
 The pole starts hanging below the cart; the policy pushes the cart left or right to
 swing it up and balance it there; running off the end of the track ends the
@@ -62,10 +62,9 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         init_weight_mean=0.0,
         init_weight_std=1.0,
         activation_fns=[act.iden, act.sigmoid, act.tanh, act.relu, act.sin, act.absl],
-        # identity on every input
-        input_activation_ids=[0 for _ in range(input_size)],
-        # tanh on the output: the environment clips the force to [-1, 1]
-        output_activation_ids=[2 for _ in range(output_size)],
+        input_activation=act.iden,
+        # the environment clips the force to [-1, 1]
+        output_activation=act.tanh,
         input_labels=["x", "x_vel", "cos_theta", "sin_theta", "theta_vel"],
         output_labels=["force"],
         capacity_growth_strategy="linear",
@@ -83,8 +82,6 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
         ),
         maximum_species=5,
         selection_tournament_size=5,
-        min_species_size=25,
-        species_warmup_threshold=5,
     )
 
     return NEATConfig(
@@ -107,7 +104,7 @@ def episode_fn(state):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evolve a policy for EvoJAX's cart-pole swing-up environment."
+        description="Evolve a policy for EvoJAX's cartpole swing-up environment."
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=100)
