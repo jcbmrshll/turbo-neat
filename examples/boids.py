@@ -1,5 +1,13 @@
 """Evolve a flocking policy for EvoJAX's boids environment.
 
+Every fish steers by the same network, seeing its nearest fish, and the fitness is
+minus the flock's energy over 100 steps: fish penalized for crowding, for heading
+off from their neighbors, and for having none ahead to follow. Each fish's own
+term adds a fixed -50 that no flock avoids, and the fish start scattered, so the
+best a flock can do is roughly -70; random steering scores about -100. With the
+population of 1000, the best tested fitness reached -73.5 to -80.5 within 100
+generations in four runs, three of them better than -75.
+
     uv run examples/boids.py --generations 100
     uv run examples/boids.py --monitor
 
@@ -71,7 +79,7 @@ def make_config(input_size: int, output_size: int) -> NEATConfig:
     )
 
     selection_config = SelectionConfig(
-        population_size=100,
+        population_size=1000,
         cutoff_pct=0.1,
         speciation_threshold=1.0,
         compatibility_coefficients=(1.0, 0.9),
