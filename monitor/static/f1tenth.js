@@ -17,7 +17,7 @@ const CAR_SCALE = 1.5;
 // parodies of the 2026 F1 teams, one per seat, in their real liveries: a name, the
 // bodywork's colour, the wings', and for a split livery the colour of the body's
 // right flank. The first few look the most different, for races of a few cars; the
-// dashboard shows the same names and colours (app.js)
+// dashboard shows the same names and colours (dashboard.js)
 export const LIVERIES = [
   ["Mclando", [255, 128, 0], [35, 35, 35], null], // McLaren
   ["Vercedes", [185, 190, 196], [0, 161, 155], null], // Mercedes

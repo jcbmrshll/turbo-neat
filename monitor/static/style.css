@@ -128,6 +128,21 @@ code {
   overflow-y: auto;
   padding: 22px 28px 60px;
 }
+
+/* the dashboard fills the main area: the run on the left scrolling on its own,
+   and the leaderboard on the right, when the run logged its members */
+#main.neat-dash { overflow: visible; padding: 0; min-width: 0; min-height: 0; }
+.nd-layout {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.nd-layout.has-board { grid-template-columns: minmax(0, 1fr) var(--board); }
+.nd-main {
+  overflow-y: auto;
+  padding: 22px 28px 60px;
+}
 .page { max-width: 1400px; }
 
 .empty {
@@ -338,9 +353,8 @@ code {
 .net .node.lit.output { stroke: var(--accent); stroke-width: 2; }
 .net-foot { font: 10.5px var(--mono); color: var(--dim); padding: 0 11px 8px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .act-key { display: inline-flex; align-items: center; gap: 5px; }
-.act-key i { width: 22px; height: 8px; border: 1px solid var(--edge-soft); }
-.act-key i:first-of-type { background: linear-gradient(90deg, var(--s2), var(--well)); }
-.act-key i:last-of-type { background: linear-gradient(90deg, var(--well), var(--s1)); }
+/* one scale, negative (orange) through zero (the background) to positive (blue) */
+.act-key i { width: 52px; height: 8px; border: 1px solid var(--edge-soft); background: linear-gradient(90deg, var(--s2), var(--well), var(--s1)); }
 /* big networks (groups.js WIDE_INPUTS): inputs close together in their groups,
    each with a bracketed label, and inputs of their own labelled small */
 .net .lab.small { font-size: 9px; }
@@ -368,7 +382,7 @@ code {
   height: 100%;
   display: flex;
   align-items: center;
-  padding: 0 2px;
+  padding: 0 5px;
   font: 10px/1 var(--mono);
   color: var(--fg);
   white-space: nowrap;
@@ -429,32 +443,27 @@ a.car-name:hover { text-decoration: underline; text-underline-offset: 2px; }
 
 /* leaderboard panel */
 
-body.has-board {
-  grid-template-columns: var(--side) 1fr var(--board);
-  grid-template-areas: "side main board";
-}
-#board {
-  grid-area: board;
+.nd-board {
   display: none;
   flex-direction: column;
   min-height: 0;
   border-left: 1px solid var(--edge);
 }
-body.has-board #board { display: flex; }
+.has-board > .nd-board { display: flex; }
 .bp-head { flex: none; padding: 12px 12px 8px; border-bottom: 1px solid var(--edge); }
 .bp-table { flex: 1; overflow-y: auto; }
 .bp-head .stitle { margin: 0 0 2px; }
 .bp-sub { font: 11px var(--mono); color: var(--dim); }
 .bp-controls { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; margin-top: 8px; }
 .bp-controls .dim { margin-right: 2px; }
-#board table.board { font-size: 11px; }
-#board .board th { background: var(--bg); padding: 4px 5px; }
-#board .board td { padding: 3px 5px; }
-#board .board th:first-child, #board .board td:first-child { padding-left: 12px; }
-#board .board th:last-child, #board .board td:last-child { padding-right: 12px; }
-#board .board td.who { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
-#board .board tr.open td.rank { box-shadow: inset 2px 0 var(--edge-hot); }
-#board .board tr.sel td.rank { box-shadow: inset 2px 0 var(--accent); }
+.nd-board table.board { font-size: 11px; }
+.nd-board .board th { background: var(--bg); padding: 4px 5px; }
+.nd-board .board td { padding: 3px 5px; }
+.nd-board .board th:first-child, .nd-board .board td:first-child { padding-left: 12px; }
+.nd-board .board th:last-child, .nd-board .board td:last-child { padding-right: 12px; }
+.nd-board .board td.who { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+.nd-board .board tr.open td.rank { box-shadow: inset 2px 0 var(--edge-hot); }
+.nd-board .board tr.sel td.rank { box-shadow: inset 2px 0 var(--accent); }
 table.board {
   border-collapse: collapse;
   width: 100%;
@@ -571,7 +580,7 @@ table.board {
 
 /* tooltip */
 
-#tip {
+.neat-tip {
   position: fixed;
   z-index: 10;
   pointer-events: none;
@@ -583,19 +592,18 @@ table.board {
   color: var(--mid);
   min-width: 90px;
 }
-#tip .head { color: var(--dim); font-size: 10.5px; margin-bottom: 2px; }
-#tip .row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-#tip .row i { width: 10px; height: 2px; display: inline-block; flex: none; }
-#tip .row b { color: var(--fg-strong); font-weight: 600; font-variant-numeric: tabular-nums; }
+.neat-tip .head { color: var(--dim); font-size: 10.5px; margin-bottom: 2px; }
+.neat-tip .row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.neat-tip .row i { width: 10px; height: 2px; display: inline-block; flex: none; }
+.neat-tip .row b { color: var(--fg-strong); font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* no room beside the run: the leaderboard goes under it */
 @media (max-width: 1250px) {
-  body.has-board {
-    grid-template-columns: var(--side) 1fr;
-    grid-template-rows: 1fr minmax(0, 40vh);
-    grid-template-areas: "side main" "side board";
+  .nd-layout.has-board {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 40vh);
   }
-  #board { border-left: none; border-top: 1px solid var(--edge); }
+  .nd-board { border-left: none; border-top: 1px solid var(--edge); }
 }
 
 @media (max-width: 900px) {
@@ -604,13 +612,8 @@ table.board {
     grid-template-rows: auto 1fr;
     grid-template-areas: "side" "main";
   }
-  body.has-board {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr minmax(0, 40vh);
-    grid-template-areas: "side" "main" "board";
-  }
   #side { border-right: none; border-bottom: 1px solid var(--edge); max-height: 200px; }
-  #main { padding: 16px; }
+  #main, .nd-main { padding: 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
