@@ -161,6 +161,8 @@ function select(runId) {
     onTabs: (tabs) => sessionStorage.setItem(`tabs:${runId}`, JSON.stringify(tabs)),
     chartWindow: Number(localStorage.getItem("chartWindow")) || null,
     onChartWindow: (n) => (n ? localStorage.setItem("chartWindow", n) : localStorage.removeItem("chartWindow")),
+    boardOpen: localStorage.getItem("boardOpen") === "1",
+    onBoardOpen: (open) => (open ? localStorage.setItem("boardOpen", "1") : localStorage.removeItem("boardOpen")),
     onRefresh: () => setConnected(true),
     onError: (e) => {
       if (runId !== state.runId) return;
