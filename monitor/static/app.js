@@ -8,24 +8,13 @@ import { h } from "./dom.js";
 import { NdArray, loadArrays, episodePlayer, traceNetwork } from "./episodes.js";
 import { BLUE, ORANGE, WELL } from "./palette.js";
 import { RENDERERS } from "./renderers.js";
+import { WIDE_INPUTS, inputGroups } from "./groups.js";
 
 const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6"].map((v) => `var(${v})`);
 const POLL_MS = 2000;
 const RUNS_POLL_MS = 5000;
 // a running run that hasn't logged for this long is probably dead
 const STALE_S = 180;
-// the stat tiles, in order, when the run logs them; "max_*" stands for the best
-// score of each of the run's tests, e.g. max_fitness_against_baseline, and
-// fitness_against_baseline is what runs logged before tests named their metrics
-const HEADLINE = [
-  "max_fitness",
-  "mean_fitness",
-  "max_*",
-  "fitness_against_baseline",
-  "num_species",
-  "mean_condensed_hidden_nodes",
-  "mean_condensed_connections",
-];
 // charts that lead the grid; the rest follow in the order they were first logged
 const CHART_ORDER = ["fitness", "fitness_against_baseline"];
 const BOARD_LIMIT = 50;
@@ -265,7 +254,6 @@ async function select(runId) {
     epochBar: epochBar(),
     overview: h("div", { class: "tab-panel" }),
     panels: h("div"),
-    tiles: h("div", { class: "tiles" }),
     media: h("div", { class: "media-grid" }),
     chartsTitle: h("div", { class: "stitle-row" }),
     charts: h("div", { class: "chart-grid" }),
@@ -274,7 +262,6 @@ async function select(runId) {
     mediaCards: {},
   };
   view.overview.append(
-    view.tiles,
     view.media,
     view.chartsTitle,
     view.charts,
@@ -315,7 +302,6 @@ async function pollRun() {
     if (firstLoad) renderConfig();
     if (firstLoad || metrics.rows.length) {
       view.epochBar.update();
-      renderTiles();
       if (state.activeTab == null) renderCharts();
       else state.overviewStale = true;
     }
@@ -380,33 +366,24 @@ function latest(key) {
   return null;
 }
 
-function renderTiles() {
-  const tests = metricKeys().filter((k) => k.startsWith("max_") && !HEADLINE.includes(k));
-  const keys = HEADLINE.flatMap((k) => (k === "max_*" ? tests : [k]));
-  const tiles = keys.filter((k) => latest(k) != null).map((k) =>
-    h(
-      "div",
-      { class: "tile" },
-      h("div", { class: "lab", text: k.replaceAll("_", " ") }),
-      h("div", { class: "val", text: fmt(latest(k)) }),
-    ),
-  );
-  view.tiles.replaceChildren(...tiles);
-  view.tiles.hidden = !tiles.length;
+// a metric's value in the epoch shown, or null if it wasn't logged then
+function valueAt(key) {
+  const step = state.epoch ?? state.rows.at(-1)?.step;
+  return state.rows.find((r) => r.step === step)?.[key] ?? null;
 }
 
 // ---------------------------------------------------------------- epoch
 
-// each chart's epoch line, to move without redrawing the chart
-const chartMarkers = [];
+// what each chart shows of the epoch shown (its epoch line, its values), to
+// update without redrawing the chart
+const chartUpdates = [];
 
 // show the run as it was at an epoch (null: the latest, following new ones)
 function setEpoch(epoch) {
   const last = state.rows.at(-1)?.step;
   state.epoch = epoch == null || epoch >= last ? null : epoch;
   view.epochBar.update();
-  renderTiles();
-  chartMarkers.forEach((place) => place());
+  chartUpdates.forEach((update) => update());
   renderMedia();
   clearTimeout(setEpoch.board);
   // dragging the slider asks for the leaderboard once it settles
@@ -511,7 +488,7 @@ function singleSpecies() {
 }
 
 function renderCharts() {
-  chartMarkers.length = 0;
+  chartUpdates.length = 0;
   const oneSpecies = singleSpecies();
   const groups = groupMetrics(metricKeys()).filter((g) => !(oneSpecies && g.name.startsWith("species_")));
   view.chartsTitle.hidden = !groups.length;
@@ -572,14 +549,22 @@ function chartCard(group, from) {
       points: state.rows.filter((r) => r[s.key] != null && r.step >= from).map((r) => [r.step, r[s.key]]),
     };
   });
-  const single = series.length === 1;
-  return seriesCard(group.name.replaceAll("_", " "), series, single && fmt(latest(series[0].key)));
+  // a species' value is its value in the epoch shown, so one that died out (or
+  // hasn't appeared yet) has none; any other metric's, its latest (tests log
+  // only every so often)
+  const species = group.name.startsWith("species_");
+  return seriesCard(group.name.replaceAll("_", " "), series, (key) => (species ? valueAt(key) : latest(key)));
 }
 
-// a card with a line chart of the series ([step, value] points), a legend when
-// there's more than one, and `latestText` in the corner if given
-function seriesCard(title, series, latestText) {
+// a card with a line chart of the series ([step, value] points) and each one's
+// value(key) as of the epoch shown: in the corner for one series, beside each
+// name in the legend for several
+function seriesCard(title, series, value) {
   const single = series.length === 1;
+  const values = series.map(() => h("b"));
+  const update = () => series.forEach((s, i) => (values[i].textContent = fmt(value(s.key))));
+  update();
+  chartUpdates.push(update);
   const card = h(
     "div",
     { class: "card chart-card" },
@@ -588,14 +573,14 @@ function seriesCard(title, series, latestText) {
       { class: "card-hdr" },
       h("span", { class: "title", text: title }),
       h("span", { class: "spacer" }),
-      latestText && h("span", { class: "latest", text: latestText }),
+      single && h("span", { class: "latest" }, values[0]),
     ),
     !single &&
       h(
         "div",
         { class: "legend" },
-        series.map((s) =>
-          h("span", { class: "key" }, h("i", { style: `background:${s.color}` }), s.name),
+        series.map((s, i) =>
+          h("span", { class: "key" }, h("i", { style: `background:${s.color}` }), s.name, values[i]),
         ),
       ),
   );
@@ -673,7 +658,7 @@ function lineChart(series, width) {
     }
   };
   placeMark();
-  chartMarkers.push(placeMark);
+  chartUpdates.push(placeMark);
   svg.append(mark);
 
   // hover: a crosshair snapped to the nearest logged step, every series in one tooltip;
@@ -874,13 +859,18 @@ async function showEpisode(card, entry) {
   }
   if (card.shown !== entry.episode) return;
   const rows = obsRows(arrays, entry.players || []).filter((r) => r.id != null);
-  const player = episodePlayer(render(arrays), { seat: rows[0]?.seat ?? null });
+  // a race between the epoch's fittest is seen from a car picked at random (the
+  // leader's is just one view of it); anything else from its first agent
+  const start = FIELD_RACES.has(entry.env) ? rows[Math.floor(Math.random() * rows.length)] : rows[0];
+  const view = render(arrays);
+  const player = listen(episodePlayer(view, { seat: start?.seat ?? null }));
+  carNames(view, player, entry.players || [], { at: { step: entry.step } });
   if (!rows.length) {
     card.body.replaceChildren(player.el);
     return;
   }
   const net = { body: h("div", { class: "ep-net" }), foot: h("div") };
-  card.body.replaceChildren(h("div", { class: "ep-grid" }, player.el, h("div", {}, net.body, net.foot)));
+  card.body.replaceChildren(h("div", { class: `ep-grid${wideNets() ? " wide" : ""}` }, player.el, h("div", {}, net.body, net.foot)));
   const pick = (seat) => {
     const row = rows.find((r) => r.seat === seat);
     if (!row) return false;
@@ -893,7 +883,91 @@ async function showEpisode(card, entry) {
     return true;
   };
   player.onSeat = pick;
-  requestAnimationFrame(() => pick(rows[0].seat));
+  requestAnimationFrame(() => pick(start.seat));
+}
+
+// a player, with what each frame drawn goes to: the network lit up beside it
+// (player.netFrame) and the names under a race's cars (player.namesFrame)
+function listen(player) {
+  player.onFrame = (frame) => {
+    player.netFrame?.(frame);
+    player.namesFrame?.(frame);
+  };
+  return player;
+}
+
+// a member's species, when the record doesn't say (members' episodes don't):
+// the one named by a word of the name it was born with, wherever in it the
+// animal is ("big-red-dog", "minty-emu-412"), the last such word if several
+function birthSpecies(p) {
+  if (p.birth_species != null) return p.birth_species;
+  const ids = new Map(Object.entries(state.speciesNames).map(([id, name]) => [name, Number(id)]));
+  const animal = (p.name ?? "").split("-").reverse().find((w) => ids.has(w));
+  return animal == null ? null : ids.get(animal);
+}
+
+// In a race whose view can say where each car's card is in its strip (f1tenth.js
+// slots), each car's member named under its card, in its species' colour,
+// following it as the cards shuffle: the followed car's in bold, and a link to
+// the member's tab (opened `at` an epoch and game) but for `self`, the member
+// whose tab it is, in bold. Returns whether it named them.
+function carNames(view, player, players, { self = null, at = null } = {}) {
+  if (!view.slots || players.length !== view.cars) return false;
+  const chips = players.map((p) => {
+    const species = birthSpecies(p);
+    // its whole name on one line, in type sized to fill its card (fit, below)
+    const name = p.name || `#${p.id}`;
+    const who = h("span", { class: "who", text: name, style: species != null ? `color:${speciesColor(species)}` : null });
+    const title = `${name}${p.reward != null ? ` · ${p.reward.toFixed(1)} m` : ""}`;
+    if (p.id === self) return h("span", { class: "car-name self", title }, who);
+    return h(
+      "a",
+      {
+        class: "car-name",
+        href: `/run/${state.runId}/genome/${p.id}`,
+        title,
+        onclick: (e) => {
+          if (e.metaKey || e.ctrlKey) return;
+          e.preventDefault();
+          openTab(p.id, { name: p.name, at });
+        },
+      },
+      who,
+    );
+  });
+  for (const chip of chips) chip.style.width = `${100 / view.cars}%`;
+  const row = h("div", { class: "car-names" }, chips);
+  // as wide as the race above it, however wide that's drawn, each name in type
+  // that fills its card's width, worked out again when the race's width changes
+  const canvas = player.el.querySelector("canvas");
+  const measure = document.createElement("canvas").getContext("2d");
+  let fitted = 0;
+  const fit = () => {
+    if (!canvas.clientWidth || canvas.clientWidth === fitted) return;
+    fitted = canvas.clientWidth;
+    row.style.width = `${fitted}px`;
+    // the card, less the chip's padding
+    const room = fitted / view.cars - 4;
+    for (const chip of chips) {
+      const who = chip.querySelector(".who");
+      // in bold, so the followed car's name fits too
+      measure.font = `700 100px ${getComputedStyle(who).fontFamily}`;
+      const perPx = measure.measureText(who.textContent).width / 100;
+      who.style.fontSize = `${Math.min(12, room / perPx).toFixed(2)}px`;
+    }
+  };
+  const place = (t) => {
+    fit();
+    view.slots(t).forEach((slot, seat) => {
+      chips[seat].style.left = `${(slot / view.cars) * 100}%`;
+      chips[seat].classList.toggle("followed", seat === player.seat);
+    });
+  };
+  // on the page before it's first placed, so the names' type can be measured
+  player.el.insertBefore(row, player.el.querySelector(".player-controls"));
+  player.namesFrame = place;
+  place(player.frame);
+  return true;
 }
 
 // a genome's network in an epoch, kept once fetched; null if it wasn't logged
@@ -939,11 +1013,8 @@ function playerLine(key, entry) {
   if (!MEDIA_ORDER.includes(key)) return [];
   const players = entry.players || [];
   if (key === "episode" && FIELD_RACES.has(entry.env)) {
-    // the field on the grid, fittest first, each linking to the member
-    if (players.length) {
-      const who = (p) => (p.name ? genomeLink(p.id, p.name, { step: entry.step }) : `#${p.id}`);
-      return [matchup(players.map((p, seat) => seatPlayer(who(p), seat, entry.env, p.reward)))];
-    }
+    // the field's members are named under their cars in the strip (carNames)
+    if (players.length) return [];
     const text = "the epoch's fittest racing each other, P1 the fittest";
     return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "dim", text })))];
   }
@@ -967,14 +1038,15 @@ function playerLine(key, entry) {
 
 // ---------------------------------------------------------------- network
 
-// net drawn to width; with a trace (episodes.js traceNetwork), also show(frame),
-// which lights it up with what it did at that frame: each node coloured by the
-// sign of its output, as strong as the output is against its largest over the
-// episode, each edge likewise by what it carried (its source's output times its
-// weight), and the inputs' and outputs' values beside their labels
-function networkView(net, width, trace = null) {
+// whether the run's networks are drawn compact, in a column beside a larger
+// episode (see WIDE_INPUTS)
+const wideNets = () => (state.run?.config?.genome_config?.input_size ?? 0) > WIDE_INPUTS;
+
+// each node's depth, its longest path from the inputs, with every output one past
+// the deepest hidden node; and the columns (or rows) that makes
+function layers(net) {
   const nodes = new Map(net.nodes.map((n) => [n.id, { ...n, depth: n.kind === "input" ? 0 : 1 }]));
-  // longest path from the inputs; bounded so a cycle can't hang the page
+  // bounded so a cycle can't hang the page
   for (let pass = 0; pass < nodes.size; pass++) {
     let changed = false;
     for (const e of net.edges) {
@@ -989,31 +1061,40 @@ function networkView(net, width, trace = null) {
   const hidden = [...nodes.values()].filter((n) => n.kind === "hidden");
   const outDepth = Math.max(1, ...hidden.map((n) => n.depth + 1));
   for (const n of nodes.values()) if (n.kind === "output") n.depth = outDepth;
-
   const columns = [];
   for (const n of nodes.values()) (columns[n.depth] ||= []).push(n);
+  return { nodes, hidden, outDepth, columns };
+}
+
+// the mean of where a node's sources sit along `axis`, to order a layer by
+function sourceMean(net, nodes, n, axis, fallback) {
+  const at = net.edges.filter((e) => e.to === n.id).map((e) => nodes.get(e.from)?.[axis]).filter((v) => v != null);
+  return at.length ? at.reduce((a, b) => a + b, 0) / at.length : fallback;
+}
+
+// Inputs in a column on the left, outputs on the right, hidden nodes between by
+// depth; each input's and output's label (and value, when lit up) beside it.
+// Sets each node's x, y; returns the size and the labels to draw.
+function layoutAcross(net, width, withValues) {
+  const { nodes, hidden, outDepth, columns } = layers(net);
   const inputs = columns[0] || [];
   const outputs = columns[outDepth] || [];
-
   const ROW = 20;
   const rows = Math.max(...columns.map((c) => (c ? c.length : 0)), 3);
   // deep, narrow networks still get room to fan out
   const H = Math.max(rows * ROW + 16, 240);
   // room for a value (" -0.42") after each label, when there are values
-  const valueChars = trace ? 6 : 0;
+  const valueChars = withValues ? 6 : 0;
   const labelW = (list) => (Math.max(0, ...list.map((n) => (n.label || "").length)) + valueChars) * 6.2 + 12;
   const padL = Math.min(160 + valueChars * 6.2, labelW(inputs));
   const padR = Math.min(160 + valueChars * 6.2, labelW(outputs));
   const W = Math.max(width, padL + padR + 120);
   const colX = (d) => padL + (d / outDepth) * (W - padL - padR);
-
   // order each column by where its inputs sit, so edges cross less
-  const placeColumn = (col, d) => {
+  columns.forEach((col, d) => {
+    if (!col) return;
     if (d > 0 && d < outDepth) {
-      for (const n of col) {
-        const ys = net.edges.filter((e) => e.to === n.id).map((e) => nodes.get(e.from)?.y).filter((y) => y != null);
-        n.order = ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : H / 2;
-      }
+      for (const n of col) n.order = sourceMean(net, nodes, n, "y", H / 2);
       col.sort((a, b) => a.order - b.order);
     } else {
       col.sort((a, b) => a.id - b.id);
@@ -1025,20 +1106,107 @@ function networkView(net, width, trace = null) {
       n.x = colX(d);
       n.y = top + i * gap;
     });
+  });
+  // inputs' labels end at their node, and outputs' start at theirs, so the values
+  // go on the side by the node
+  const labels = [...inputs, ...outputs].map((n) => {
+    const input = n.kind === "input";
+    return { x: n.x + (input ? -9 : 9), y: n.y + 3.5, anchor: input ? "end" : null, text: n.label, value: n.id, valueFirst: !input };
+  });
+  const edge = (a, b) => {
+    const mx = (a.x + b.x) / 2;
+    return `M${a.x},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`;
   };
-  columns.forEach((col, d) => col && placeColumn(col, d));
+  return { nodes, hidden, W, H, labels, edge };
+}
 
-  const svg = h("svg", { class: "net", viewBox: `0 0 ${W} ${H}`, height: H });
+// Inputs in a column down the left, close together in their groups (lidar,
+// car 0, ...) with one label each, and inputs of their own labelled singly;
+// outputs down the right with their labels (and values, when lit up); hidden
+// nodes in columns between by depth, each level with its sources. All in
+// `height`, the height of the episode beside it, where that leaves room.
+function layoutGrouped(net, width, height, withValues) {
+  const { nodes, hidden, outDepth, columns } = layers(net);
+  const inputs = (columns[0] || []).sort((a, b) => a.id - b.id);
+  const outputs = columns[outDepth] || [];
+  const groups = inputGroups(inputs, (n) => n.label).map((g) => ({ name: g.name, nodes: g.members }));
+  const label = (g) => (g.name != null && g.nodes.length > 1 ? g.name : null);
+  const longest = Math.max(...groups.flatMap((g) => (label(g) ? [label(g)] : g.nodes.map((n) => n.label || ""))).map((t) => t.length));
+  // as tall as the episode, but never so short that the inputs labelled singly
+  // are less than 6px apart and their labels run into each other
+  const PADY = 10, H = Math.max(height, 240, 2 * PADY + 6 * (inputs.length + 0.8 * (groups.length - 1)));
+  const padL = Math.min(110, longest * 5.6 + 14);
+  const padR = Math.min(120, (Math.max(...outputs.map((n) => (n.label || "").length)) + (withValues ? 6 : 0)) * 6.2 + 14);
+  const W = Math.max(width, padL + padR + 60);
+  // a slot per input, and most of one between groups
+  const slot = (H - 2 * PADY) / (inputs.length + 0.8 * (groups.length - 1));
+  let y = PADY + slot / 2;
+  for (const [i, g] of groups.entries()) {
+    if (i) y += 0.8 * slot;
+    for (const n of g.nodes) {
+      n.x = padL;
+      n.y = y;
+      y += slot;
+    }
+  }
+  // each deeper column level with its sources, pushed apart where they crowd
+  const colX = (d) => padL + (d / outDepth) * (W - padL - padR);
+  const place = (col, x, minGap) => {
+    for (const n of col) n.order = sourceMean(net, nodes, n, "y", H / 2);
+    col.sort((a, b) => a.order - b.order);
+    let prev = -Infinity;
+    for (const n of col) {
+      n.y = Math.max(n.order, prev + minGap, PADY);
+      n.x = x;
+      prev = n.y;
+    }
+    // back inside the height, keeping the gaps
+    const over = (col.at(-1)?.y ?? 0) - (H - PADY);
+    if (over > 0) for (const n of col) n.y -= over;
+  };
+  for (let d = 1; d < outDepth; d++) if (columns[d]) place(columns[d], colX(d), 12);
+  place(outputs, colX(outDepth), 30);
+  const labels = [];
+  for (const g of groups) {
+    if (label(g)) {
+      // a group's name beside its span, with a bracket
+      const y0 = g.nodes[0].y, y1 = g.nodes.at(-1).y;
+      labels.push({ x: padL - 9, y: (y0 + y1) / 2 + 3.5, anchor: "end", text: label(g), bracket: [y0 - 2, y1 + 2, padL - 6] });
+    } else {
+      for (const n of g.nodes) labels.push({ x: padL - 7, y: n.y + 3, anchor: "end", text: n.label, small: true });
+    }
+  }
+  for (const n of outputs) labels.push({ x: n.x + 9, y: n.y + 3.5, anchor: null, text: n.label, value: n.id, valueFirst: true });
+  const edge = (a, b) => {
+    const mx = (a.x + b.x) / 2;
+    return `M${a.x},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`;
+  };
+  return { nodes, hidden, W, H, labels, edge };
+}
+
+// net drawn to width; with a trace (episodes.js traceNetwork), also show(frame),
+// which lights it up with what it did at that frame: each node coloured by the
+// sign of its output, as strong as the output is against its largest over the
+// episode, each edge likewise by what it carried (its source's output times its
+// weight), and the labelled nodes' values beside their labels. Networks of more
+// than WIDE_INPUTS inputs are drawn grouped and compact, `height` tall
+// (layoutGrouped); the rest with every input labelled (layoutAcross).
+function networkView(net, width, trace = null, { height = 480 } = {}) {
+  const wide = net.nodes.filter((n) => n.kind === "input").length > WIDE_INPUTS;
+  const { nodes, hidden, W, H, labels, edge } = wide
+    ? layoutGrouped(net, width, height, Boolean(trace))
+    : layoutAcross(net, width, Boolean(trace));
+
+  const svg = h("svg", { class: `net${wide ? " wide" : ""}`, viewBox: `0 0 ${W} ${H}`, height: H });
   const maxW = Math.max(1e-6, ...net.edges.map((e) => Math.abs(e.weight)));
   const edgeEls = [];
   for (const e of net.edges) {
     const a = nodes.get(e.from), b = nodes.get(e.to);
     if (!a || !b) continue;
     const s = Math.abs(e.weight) / maxW;
-    const mx = (a.x + b.x) / 2;
     const el = h("path", {
       class: "edge",
-      d: `M${a.x},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`,
+      d: edge(a, b),
       stroke: e.weight >= 0 ? "var(--s1)" : "var(--s2)",
       "stroke-width": (0.75 + 2.25 * s).toFixed(2),
       opacity: (0.3 + 0.55 * s).toFixed(2),
@@ -1054,10 +1222,10 @@ function networkView(net, width, trace = null) {
   const range = trace && traceRanges(trace);
   let frame = 0;
   const valueAt = (id) => trace.values[frame * trace.nodes + col.get(id)];
-  const valueEls = [];
   const nodeEls = [];
   for (const n of nodes.values()) {
-    const node = h("circle", { class: `node ${n.kind}${trace ? " lit" : ""}`, cx: n.x, cy: n.y, r: n.kind === "hidden" ? 4.5 : 5 });
+    const r = n.kind === "hidden" ? 4.5 : wide && n.kind === "input" ? 2.6 : 5;
+    const node = h("circle", { class: `node ${n.kind}${trace ? " lit" : ""}`, cx: n.x, cy: n.y, r });
     node.id_ = n.id;
     nodeEls.push(node);
     node.addEventListener("pointerenter", (ev) => {
@@ -1079,15 +1247,18 @@ function networkView(net, width, trace = null) {
       hideTip();
     });
     svg.append(node);
-    if (n.kind === "input" || n.kind === "output") {
-      const value = trace ? h("tspan", { class: "val" }) : null;
-      const input = n.kind === "input";
-      // inputs' labels end at their node, and outputs' start at theirs, so the
-      // values go on the side by the node
-      const parts = input ? [n.label, value && " ", value] : [value, value && " ", n.label];
-      svg.append(h("text", { class: "lab", x: n.x + (input ? -9 : 9), y: n.y + 3.5, "text-anchor": input ? "end" : null }, ...parts));
-      if (value) valueEls.push([value, n.id]);
+  }
+  const valueEls = [];
+  for (const l of labels) {
+    const value = trace && l.value != null ? h("tspan", { class: "val" }) : null;
+    const parts = l.valueFirst ? [value, value && " ", l.text] : [l.text, value && " ", value];
+    const attrs = { class: `lab${l.bracket ? " group" : ""}${l.small ? " small" : ""}`, x: l.x, y: l.y, "text-anchor": l.anchor };
+    svg.append(h("text", attrs, ...parts));
+    if (l.bracket) {
+      const [y0, y1, x] = l.bracket;
+      svg.append(h("path", { class: "bracket", d: `M${x + 3},${y0} H${x} V${y1} H${x + 3}` }));
     }
+    if (value) valueEls.push([value, l.value]);
   }
   const summary = `${hidden.length} hidden · ${net.edges.length} connections`;
   if (!trace) return { svg, summary, show: null };
@@ -1382,8 +1553,8 @@ function renderBoard() {
   // rebuilding the species list while it's open would close it
   const choosing = top.contains(document.activeElement) && document.activeElement.tagName === "SELECT";
   top.replaceChildren(
-    h("div", { class: "stitle", text: "Leaderboard" }),
-    h("div", { class: "bp-sub", text: `epoch ${board.step} · ${board.population} members · ${board.total.toLocaleString("en")} seen` }),
+    h("div", { class: "stitle", text: "Population" }),
+    h("div", { class: "bp-sub", text: `epoch ${board.step} · ${board.population} members` }),
     choosing ? top.querySelector(".bp-controls") : h("div", { class: "bp-controls" }, scopes, filter),
   );
   const scrolled = wrap.scrollTop;
@@ -1674,9 +1845,9 @@ function renderMember(tab) {
     ...[
       head,
       tiles,
-      h("div", { class: "lineage-grid" }, cards.network.el, cards.episode.el),
-      pedigree,
+      h("div", { class: `lineage-grid${wideNets() ? " wide" : ""}` }, cards.network.el, cards.episode.el),
       cards.descent.el,
+      pedigree,
       offspring,
     ].filter(Boolean),
   );
@@ -1701,6 +1872,8 @@ function memberCards(tab) {
     return c;
   };
   tab.cards = { network: card(), episode: card(), descent: card() };
+  // a wide network goes in a column beside the episode
+  if (wideNets()) tab.cards.network.el.classList.add("wide-net");
   return tab.cards;
 }
 
@@ -1753,12 +1926,14 @@ function linkMember(tab) {
 // what it did with the episode's observations in that row, at the player's frame
 function drawNetwork(card, net, activity = null) {
   const trace = activity && traceNetwork(net, obsOf(activity.arrays, activity.row.row));
-  const { svg, summary, show } = networkView(net, card.body.clientWidth - 22, trace?.error ? null : trace);
+  // a grouped network is as tall as the episode beside it
+  const height = activity?.player.el.querySelector("canvas")?.clientHeight || undefined;
+  const { svg, summary, show } = networkView(net, card.body.clientWidth - 22, trace?.error ? null : trace, { height });
   card.body.replaceChildren(svg);
   const legend = show && h("span", { class: "act-key" }, "−", h("i"), "activation", h("i"), "+");
   card.foot.replaceChildren(h("div", { class: "net-foot" }, h("span", { text: summary }), legend, trace?.error && h("span", { class: "dim", text: trace.error })));
   if (activity) {
-    activity.player.onFrame = show || null;
+    activity.player.netFrame = show || null;
     show?.(activity.player.frame);
   }
 }
@@ -1834,12 +2009,12 @@ async function loadEpisodes(tab, card) {
       eps.env,
       p.reward,
     );
-  const players = ep.players.length > 1 && matchup(ep.players.map(player));
-  card.foot.replaceChildren(...[players].filter(Boolean));
   // a new player only when the episode changes, so one that's playing carries on
   const src = `/api/runs/${state.runId}/member_episodes/${eps.step}/${ep.index}`;
   if (card.shown === src) return;
   card.shown = src;
+  const players = ep.players.length > 1 && matchup(ep.players.map(player));
+  card.foot.replaceChildren(...[players].filter(Boolean));
   card.player = null;
   card.body.replaceChildren(h("div", { class: "loading", text: "loading…" }));
   const render = RENDERERS[eps.env];
@@ -1856,7 +2031,8 @@ async function loadEpisodes(tab, card) {
   card.rows = obsRows(arrays, ep.players);
   // the member's own agent, the first of them if it plays several (a flock)
   const own = card.rows.find((r) => r.id === tab.id);
-  card.player = episodePlayer(render(arrays), { seat: own ? own.seat : ep.seat });
+  const view = render(arrays);
+  card.player = listen(episodePlayer(view, { seat: own ? own.seat : ep.seat }));
   card.player.onSeat = (seat) => {
     const row = card.rows.find((r) => r.seat === seat);
     if (row?.id === tab.id) {
@@ -1869,6 +2045,9 @@ async function loadEpisodes(tab, card) {
     return row?.id != null;
   };
   card.body.replaceChildren(card.player.el);
+  // a race's members are named under their cars; anything else says who played
+  // which seat below
+  if (carNames(view, card.player, ep.players, { self: tab.id, at: { step: eps.step, game: ep.index } })) card.foot.replaceChildren();
   linkMember(tab);
 }
 
