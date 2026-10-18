@@ -95,13 +95,13 @@ export function status(run) {
   return run.status;
 }
 
-// one tooltip for every dashboard on the page
+// one tooltip for every dashboard on the page, in what's full screen when
+// something is, or it wouldn't be seen
 let tip = null;
 export function showTip(x, y, ...children) {
-  if (!tip) {
-    tip = h("div", { class: "neat-tip", hidden: true });
-    document.body.append(tip);
-  }
+  tip ??= h("div", { class: "neat-tip", hidden: true });
+  const over = document.fullscreenElement ?? document.body;
+  if (tip.parentNode !== over) over.append(tip);
   tip.replaceChildren(...children);
   tip.hidden = false;
   const r = tip.getBoundingClientRect();
@@ -1255,7 +1255,9 @@ export function mountDashboard(root, options) {
       card.body.replaceChildren(player.el);
       return;
     }
-    card.body.replaceChildren(h("div", { class: `ep-grid${wideNets() ? " wide" : ""}` }, player.el, h("div", {}, net.body, net.foot)));
+    // full screen together
+    player.fullEl = h("div", { class: `ep-grid${wideNets() ? " wide" : ""}` }, player.el, h("div", {}, net.body, net.foot));
+    card.body.replaceChildren(player.fullEl);
     const pick = (seat) => {
       const row = rows.find((r) => r.seat === seat);
       if (!row) return false;
@@ -1862,7 +1864,7 @@ export function mountDashboard(root, options) {
       tab.el.replaceChildren(
         head,
         tiles,
-        h("div", { class: "lineage-grid" }, h("div", { class: `card${wideNets() ? " wide-net" : ""}` }, h("div", { class: "card-hdr" }, h("span", { class: "title", text: "network" }), h("span", { class: "spacer" }), h("span", { class: "latest", text: `${w.step} ${step}` })), card.body, card.foot)),
+        h("div", { class: "lineage-grid" }, h("div", { class: "card" }, h("div", { class: "card-hdr" }, h("span", { class: "title", text: "network" }), h("span", { class: "spacer" }), h("span", { class: "latest", text: `${w.step} ${step}` })), card.body, card.foot)),
         note,
       );
       fetchNetwork(ind.id, step).then((net) => !dead && net && requestAnimationFrame(() => drawNetwork(card, net)));
@@ -1924,7 +1926,7 @@ export function mountDashboard(root, options) {
       ...[
         head,
         tiles,
-        h("div", { class: `lineage-grid${wideNets() ? " wide" : ""}` }, cards.network.el, cards.episode.el),
+        h("div", { class: "lineage-grid" }, cards.episode.el),
         cards.descent.el,
         pedigree,
         offspring,
@@ -1939,7 +1941,7 @@ export function mountDashboard(root, options) {
     });
   }
 
-  // the member's network and episodes, in the epoch tab.step, and its line of
+  // the member's episode and network, in the epoch tab.step, and its line of
   // descent. Made once per tab and kept across redraws, so an episode that's playing
   // isn't restarted by every new epoch; hidden for runs that didn't log them
   function memberCards(tab) {
@@ -1950,16 +1952,36 @@ export function mountDashboard(root, options) {
       c.el.hidden = true;
       return c;
     };
-    tab.cards = { network: card(), episode: card(), descent: card() };
-    // a wide network goes in a column beside the episode
-    if (wideNets()) tab.cards.network.el.classList.add("wide-net");
+    tab.cards = { episode: card(), descent: card() };
+    // the episode and the network in one card, like the run's test episode: the
+    // episode (card.shows, a player once it's loaded) beside the network
+    // (card.network, drawn into card.net), or whichever there is
+    const episode = tab.cards.episode;
+    episode.net = { body: h("div", { class: "ep-net" }), foot: h("div") };
+    episode.netEl = h("div", {}, episode.net.body, episode.net.foot);
+    episode.grid = h("div", { class: "ep-grid" });
+    episode.body.append(episode.grid);
     return tab.cards;
   }
 
   function loadMemberCards(tab) {
-    loadNetwork(tab, tab.cards.network);
+    loadNetwork(tab, tab.cards.episode);
     loadEpisodes(tab, tab.cards.episode);
     loadDescent(tab, tab.cards.descent);
+  }
+
+  // the member's episode card with what it has of the episode and network
+  function placeMember(tab, card) {
+    const parts = [card.shows, card.network && card.netEl].filter(Boolean);
+    card.el.hidden = !parts.length;
+    // (moved only when they change, so a player that's playing carries on)
+    const kids = card.grid.children;
+    if (kids.length !== parts.length || parts.some((el, i) => kids[i] !== el)) card.grid.replaceChildren(...parts);
+    // a wide network goes in a column beside the episode
+    card.grid.classList.toggle("wide", parts.length > 1 && wideNets());
+    if (card.player) card.player.fullEl = card.network ? card.grid : null;
+    const step = card.shows ? card.episodeStep : tab.step;
+    card.hdr.replaceChildren(h("span", { class: "title", text: card.shows ? "sample episode" : "network" }), h("span", { class: "spacer" }), h("span", { class: "latest", text: `${w.step} ${step}` }));
   }
 
   // the member's network or episodes ("network" or "episodes") in tab.step: null
@@ -1979,28 +2001,30 @@ export function mountDashboard(root, options) {
   async function loadNetwork(tab, card) {
     const net = await memberData(tab, "network");
     if (net === undefined) return;
-    card.el.hidden = !net;
-    if (!net) return;
-    card.net = net;
-    card.hdr.replaceChildren(h("span", { class: "title", text: "network" }), h("span", { class: "spacer" }), h("span", { class: "latest", text: `${w.step} ${tab.step}` }));
-    requestAnimationFrame(() => linkMember(tab));
+    card.network = net;
+    placeMember(tab, card);
+    if (net) requestAnimationFrame(() => linkMember(tab));
   }
 
   // the member's network, lit up by what it did at each frame of its episode when
   // the episode recorded its observations
   function linkMember(tab) {
-    const { network, episode } = tab.cards;
-    if (!network.net) return;
+    const { episode } = tab.cards;
+    if (!episode.network) return;
     const player = episode.player;
     const row = player && episode.rows.find((r) => r.id === tab.id && r.seat === player.seat);
-    drawNetwork(network, network.net, row ? { arrays: episode.arrays, row, player } : null);
+    drawNetwork(episode.net, episode.network, row ? { arrays: episode.arrays, row, player } : null);
   }
 
   async function loadEpisodes(tab, card) {
     const eps = await memberData(tab, "episodes");
     if (eps === undefined) return;
-    card.el.hidden = !eps?.episodes.length;
-    if (card.el.hidden) return;
+    if (!eps?.episodes.length) {
+      Object.assign(card, { shows: null, player: null, shown: null });
+      card.foot.replaceChildren();
+      placeMember(tab, card);
+      return;
+    }
     // a two-player task shows each side the same view of the game (slimevolley
     // mirrors observations), so one game is enough: the member's own, the one it's
     // seated first in, unless it was opened on another
@@ -2008,7 +2032,6 @@ export function mountDashboard(root, options) {
       eps.episodes.find((e) => e.index === tab.game) ||
       eps.episodes.find((e) => e.seat === 0) ||
       eps.episodes[0];
-    card.hdr.replaceChildren(h("span", { class: "title", text: "sample episode" }), h("span", { class: "spacer" }), h("span", { class: "latest", text: `${w.step} ${eps.step}` }));
     const at = { step: eps.step, game: ep.index };
     // games of several players: say who played which seat, in the order and colours
     // of the picture; the others open on this same game
@@ -2030,14 +2053,19 @@ export function mountDashboard(root, options) {
     const players = ep.players.length > 1 && matchup(ep.players.map(player));
     card.foot.replaceChildren(...[players].filter(Boolean));
     card.player = null;
-    card.body.replaceChildren(h("div", { class: "loading", text: "loading…" }));
+    card.episodeStep = eps.step;
+    card.shows = h("div", { class: "loading", text: "loading…" });
+    placeMember(tab, card);
     const render = RENDERERS[eps.env];
     let arrays;
     try {
       if (!render) throw new Error(`no renderer for ${eps.env}`);
       arrays = await loadArrays(src);
     } catch (e) {
-      if (card.shown === src) card.body.replaceChildren(h("div", { class: "media-error", text: `couldn't show this episode: ${e.message}` }));
+      if (card.shown === src) {
+        card.shows = h("div", { class: "media-error", text: `couldn't show this episode: ${e.message}` });
+        placeMember(tab, card);
+      }
       return;
     }
     if (dead || card.shown !== src) return;
@@ -2059,7 +2087,8 @@ export function mountDashboard(root, options) {
       }
       return id != null;
     };
-    card.body.replaceChildren(card.player.el);
+    card.shows = card.player.el;
+    placeMember(tab, card);
     // a race's members are named under their cars; anything else says who played
     // which seat below
     if (carNames(view, card.player, ep.players, { self: tab.id, at })) card.foot.replaceChildren();

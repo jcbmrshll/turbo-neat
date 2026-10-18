@@ -59,13 +59,15 @@ document.addEventListener("keydown", (ev) => {
   if (hovered.key(ev.key)) ev.preventDefault();
 });
 
-// A canvas playing view (a renderer's, see renderers.js) with play/pause, a scrubber
-// and speeds; space plays and pauses, the arrow keys step a frame, while the pointer
-// is over it. player.onFrame(frame) is called with every frame drawn, and
-// player.onSeat(seat) when the reader clicks an agent other than the one picked
-// out (`seat`, to begin with), for views that can say which is where: true if it
-// did something with it. A view can count its frames its own way, counter(frame),
-// and say where the arrow keys go from a frame, step(frame, ±1).
+// A canvas playing view (a renderer's, see renderers.js) with play/pause, a scrubber,
+// speeds and full screen; space plays and pauses, the arrow keys step a frame and f
+// goes full screen, while the pointer is over it. player.onFrame(frame) is called
+// with every frame drawn, and player.onSeat(seat) when the reader clicks an agent
+// other than the one picked out (`seat`, to begin with), for views that can say
+// which is where: true if it did something with it. A view can count its frames its
+// own way, counter(frame), and say where the arrow keys go from a frame,
+// step(frame, ±1). Full screen is the player's own element, or player.fullEl, one
+// holding it (the network beside it).
 export function episodePlayer(view, { seat = null, maxHeight = MAX_HEIGHT } = {}) {
   const canvas = h("canvas");
   canvas.style.aspectRatio = `${view.width} / ${view.height}`;
@@ -77,10 +79,13 @@ export function episodePlayer(view, { seat = null, maxHeight = MAX_HEIGHT } = {}
   const scrub = h("input", { type: "range", min: 0, max: Math.max(0, view.frames - 1), step: 1, value: 0 });
   const counter = h("span", { class: "pos" });
   const speedBtns = SPEEDS.map((s) => h("button", { text: `${s}×`, onclick: () => setSpeed(s) }));
-  const controls = h("div", { class: "scrub player-controls" }, playBtn, scrub, counter, ...speedBtns);
+  const fullBtn = document.fullscreenEnabled && h("button", { class: "full", title: "full screen (f)", onclick: () => toggleFull() }, fullIcon());
+  const controls = h("div", { class: "scrub player-controls" }, playBtn, scrub, counter, ...speedBtns, fullBtn);
   const el = h("div", { class: "player" }, canvas, !still && controls);
+  // full screen, as big as fits (dashboard.css .player:fullscreen)
+  el.style.setProperty("--aspect", view.width / view.height);
 
-  const player = { el, frame: 0, seat, playing: !still, speed: 1, onFrame: null, onSeat: null };
+  const player = { el, frame: 0, seat, playing: !still, speed: 1, onFrame: null, onSeat: null, fullEl: null };
   let scale = 1;
   // the frame's time at the last play or seek, so playback is real time whatever
   // the display's refresh rate
@@ -113,6 +118,11 @@ export function episodePlayer(view, { seat = null, maxHeight = MAX_HEIGHT } = {}
     player.speed = s;
     anchor = { time: performance.now(), frame: player.frame };
     speedBtns.forEach((b, i) => b.classList.toggle("on", SPEEDS[i] === s));
+  }
+  function toggleFull() {
+    const target = player.fullEl ?? el;
+    if (document.fullscreenElement === target) document.exitFullscreen();
+    else target.requestFullscreen().catch(() => {});
   }
   player.play = () => setPlaying(true);
   player.pause = () => setPlaying(false);
@@ -186,7 +196,8 @@ export function episodePlayer(view, { seat = null, maxHeight = MAX_HEIGHT } = {}
       setPlaying(false);
       const dir = key === "ArrowRight" ? 1 : -1;
       player.setFrame(view.step ? view.step(player.frame, dir) : player.frame + dir);
-    } else return false;
+    } else if (key === "f" && fullBtn) toggleFull();
+    else return false;
     return true;
   };
   el.addEventListener("pointerenter", () => (hovered = player));
@@ -195,6 +206,12 @@ export function episodePlayer(view, { seat = null, maxHeight = MAX_HEIGHT } = {}
   setSpeed(1);
   setPlaying(player.playing);
   return player;
+}
+
+// four corners pointing out
+function fullIcon() {
+  return h("svg", { viewBox: "0 0 10 10", width: 10, height: 10 },
+    h("path", { d: "M0.5 3.5v-3h3M6.5 0.5h3v3M9.5 6.5v3h-3M3.5 9.5h-3v-3", fill: "none", stroke: "currentColor", "stroke-width": 1.2 }));
 }
 
 // ---------------------------------------------------------------- activations

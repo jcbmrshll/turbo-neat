@@ -337,13 +337,36 @@
 .neat-dash .player-controls button { min-width: 30px; }
 .neat-dash .player.descent canvas { border: none; }
 .neat-dash .player-controls .play { min-width: 34px; }
+.neat-dash .player-controls .full { display: inline-flex; align-items: center; justify-content: center; }
+.neat-dash .player-controls .full svg { width: 10px; height: 10px; }
+/* full screen: the episode as big as fits above its controls (and a race's names),
+   which run as wide as it, and beside it the network playing it, if any */
+.neat-dash :is(.player, .ep-grid):fullscreen {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 24px;
+  background: var(--bg);
+}
+.neat-dash :is(.player:fullscreen, :fullscreen > .player) {
+  --room: 64px;
+  /* the width that makes it as tall as the screen */
+  --tall: calc((100dvh - var(--room)) * var(--aspect));
+}
+.neat-dash :is(.player:fullscreen, :fullscreen > .player):has(.car-names) { --room: 90px; }
+.neat-dash :fullscreen canvas { max-width: none !important; background: var(--panel); }
+.neat-dash .player:fullscreen :is(canvas, .player-controls) { width: min(100%, var(--tall)); }
+.neat-dash .ep-grid:fullscreen { gap: 24px; }
+.neat-dash .ep-grid:fullscreen > .player { flex: none; width: min(65%, var(--tall)); }
+.neat-dash .ep-grid:fullscreen > :not(.player) { flex: 1; min-width: 0; }
+.neat-dash .ep-grid:fullscreen svg.net { height: auto; max-height: calc(100dvh - 72px); }
 /* a test's episode and the network playing it, side by side when there's room */
 .neat-dash .ep-grid { width: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 10px; align-items: start; }
 /* a big network goes compact in a column beside a larger episode, which loses
    the player's cap on its height */
-.neat-dash :is(.ep-grid, .lineage-grid).wide { grid-template-columns: minmax(0, 1fr) 280px; }
-.neat-dash .lineage-grid > .wide-net { order: 1; }
-.neat-dash :is(.ep-grid, .lineage-grid).wide .player canvas { max-width: none !important; }
+.neat-dash .ep-grid.wide { grid-template-columns: minmax(0, 1fr) 280px; }
+.neat-dash .ep-grid.wide .player canvas { max-width: none !important; }
 /* a race's members, under their cars' cards in the strip, moving with them */
 .neat-dash .car-names { position: relative; align-self: center; height: 16px; margin-top: -3px; }
 .neat-dash .car-name {
