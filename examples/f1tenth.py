@@ -8,13 +8,17 @@ cars around it.
 
 To see how good the best are, every --test-every generations the --cars fittest
 race each other (--field-races races, starting from every place on the grid in
-turn), and the monitor logs the field's mean and best distance, in metres, with one
-of their races. With --test bots, the 10 fittest each race pure pursuit bots that
-follow the track's centerline instead, scoring the distance they cover, and the
-monitor shows the best one's race.
+turn), and the monitor shows one of their races and logs three stats of each car in
+them: its average lap time in seconds, over the laps it completed (a lap being the
+track's length from its place on the grid), how many times it passed a car that was
+still racing, and whether it crashed. Each is the car's mean over the races (lap
+time over those it completed a lap in), and the monitor charts the mean, least and
+most over the cars (lap_time, passes, crashes). With --test bots, the 10 fittest
+each race pure pursuit bots that follow the track's centerline instead, scoring the
+distance they cover, and the monitor shows the best one's race.
 
 The defaults race 11 cars, 8 m apart on the grid, 20 races per genome each
-generation, in 20-second races, and test the field in 60-second races. Self-play
+generation, in 20-second races, and test the field in 120-second races. Self-play
 takes a while to get going: in three runs of them, the cars only learned to race
 past the first corner after about 130, 180 and 550 generations. Two of those
 fields went on to cover more than a lap of Spielberg (about 343 m) in a test race,
@@ -83,6 +87,17 @@ class RaceState:
     key: jax.Array
     # each car's reward so far: metres along the track
     rewards: jax.Array
+    # control steps raced
+    steps: jax.Array
+    # where each car started, in metres along the track, so that start + rewards
+    # is how far round it is, counting laps
+    start: jax.Array
+    # each car's complete laps (a track's length from where it started), and the
+    # step it completed the last one on
+    laps: jax.Array
+    lap_steps: jax.Array
+    # how many times each car passed (or lapped) a car still in the race
+    passes: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -127,7 +142,7 @@ class F1TenthRace:
         self.act_size = 2
         params = env.params
         # seconds per control step, and control steps per recorded frame
-        self.dt = params.timestep * params.timestep_ratio
+        self.dt = dt = params.timestep * params.timestep_ratio
         self.record_every = max(1, round(1 / (RECORD_HZ * self.dt)))
         distance_transform = jnp.asarray(env.distance_transform)
         self.sensing_range = sensing = max(MIN_SENSING_RANGE, SENSING_TIME * max_speed)
@@ -219,6 +234,18 @@ class F1TenthRace:
                 jnp.where(gain < -half, gain + env.track_length, gain),
             )
 
+        def passes(before, after, racing):
+            """How many times each car got a lap further on than another car still
+            racing, between positions before and after along the track (counting
+            laps): passing it, or lapping it."""
+
+            def laps_ahead(position):
+                gap = position[:, None] - position[None, :]
+                return jnp.floor(gap / env.track_length)
+
+            gained = jnp.maximum(laps_ahead(after) - laps_ahead(before), 0.0)
+            return (gained * racing[None, :]).sum(axis=1).astype(jnp.int32)
+
         def observe(state: State) -> jax.Array:
             x, y, steer, speed, yaw, yaw_rate, slip = state.cartesian_states.T
             own = jnp.column_stack(
@@ -276,11 +303,17 @@ class F1TenthRace:
                 frenet_states=frenet,
                 last_frenet_states=frenet,
             )
+            zeros = jnp.zeros(num_cars, jnp.int32)
             return RaceState(
                 env_state=env_state,
                 obs=observe(env_state),
                 key=next_key,
                 rewards=jnp.zeros(num_cars),
+                steps=jnp.zeros((), jnp.int32),
+                start=frenet[:, 0],
+                laps=zeros,
+                lap_steps=zeros,
+                passes=zeros,
             )
 
         def step_fn(state: RaceState, actions: jax.Array):
@@ -296,16 +329,47 @@ class F1TenthRace:
             # crash, and the env freezes it in place from the next
             env_state = settle(env_state)
             rewards = progress(env_state)
+            total = state.rewards + rewards
+            steps = state.steps + 1
+            # driving back over the line and on again doesn't count a lap twice
+            laps = jnp.maximum(
+                state.laps, (total // env.track_length).astype(jnp.int32)
+            )
             state = RaceState(
                 env_state=env_state,
                 obs=observe(env_state),
                 key=next_key,
-                rewards=state.rewards + rewards,
+                rewards=total,
+                steps=steps,
+                start=state.start,
+                laps=laps,
+                lap_steps=jnp.where(laps > state.laps, steps, state.lap_steps),
+                passes=state.passes
+                + passes(
+                    state.start + state.rewards,
+                    state.start + total,
+                    ~env_state.collisions,
+                ),
             )
             return state, rewards, env_state.collisions.all()
 
+        def stats(state: RaceState) -> dict:
+            """Each car's average lap time in seconds over the laps it completed
+            (NaN without one), how many times it passed a car still racing, and
+            whether it crashed: of a race, or a batch of races."""
+            return dict(
+                lap_time=jnp.where(
+                    state.laps > 0,
+                    state.lap_steps * dt / jnp.maximum(state.laps, 1),
+                    jnp.nan,
+                ),
+                passes=state.passes.astype(jnp.float32),
+                crashes=state.env_state.collisions.astype(jnp.float32),
+            )
+
         # one race, unbatched
         self.reset_one, self.step_one = reset_fn, step_fn
+        self.stats = stats
         self._reset_fn = jax.jit(jax.vmap(reset_fn))
         self._step_fn = jax.jit(jax.vmap(step_fn))
 
@@ -566,7 +630,7 @@ def main():
     parser.add_argument(
         "--test-seconds",
         type=float,
-        default=60.0,
+        default=120.0,
         help="length of the test races (the ones the monitor shows), if not "
         "--race-seconds",
     )
@@ -654,9 +718,11 @@ def main():
                 max_resets=max_resets,
                 record_every=race.record_every,
                 record_fn=race.record_frame,
+                stats_fn=race.stats,
             ),
             size=args.cars,
-            name="field_distance",
+            # just their stats: distance is what fitness already logs
+            name=None,
         )
 
     neat = NEAT(

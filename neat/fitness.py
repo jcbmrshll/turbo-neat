@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, Optional, Protocol, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +33,21 @@ class Scores:
 
     returns: jax.Array
     recording: Optional[Recording] = None
+
+
+def describe_stats(stats: Dict[str, jax.Array]) -> Dict[str, Any]:
+    """Metrics of stats by name, a value per genome (NaN where it doesn't apply):
+    their mean, least and most over the genomes they apply to, as mean_<name>,
+    min_<name> and max_<name>, NaN where they apply to none."""
+    metrics = {}
+    for name, values in stats.items():
+        for agg, fn in (
+            ("mean", jnp.nanmean),
+            ("min", jnp.nanmin),
+            ("max", jnp.nanmax),
+        ):
+            metrics[f"{agg}_{name}"] = fn(values)
+    return metrics
 
 
 def _episode_major(frames: Any) -> Any:
@@ -87,10 +102,38 @@ def rollout(
     keep_every: int = 1,
     replicate_rng: bool = False,
 ) -> Tuple[jax.Array, Any]:
+    """Each episode's total reward, and what keep kept (see play)."""
+    state, frames = play(
+        step_fn,
+        reset_fn,
+        rng,
+        policy,
+        num_envs,
+        num_steps,
+        max_resets,
+        keep=keep,
+        keep_every=keep_every,
+        replicate_rng=replicate_rng,
+    )
+    return state.reward, frames
+
+
+def play(
+    step_fn: Callable,
+    reset_fn: Callable,
+    rng: jax.Array,
+    policy: Callable[[jax.Array], jax.Array],
+    num_envs: int,
+    num_steps: int,
+    max_resets: Optional[int],
+    keep: Optional[Callable[[Any], Any]] = None,
+    keep_every: int = 1,
+    replicate_rng: bool = False,
+) -> Tuple[FitnessState, Any]:
     """Play num_envs episodes side by side for num_steps steps, with policy mapping
-    their batched observations to actions. Returns each episode's total reward, and
-    keep(environment state) every keep_every steps (None without keep), stacked on a
-    leading step axis.
+    their batched observations to actions. Returns the final FitnessState, with each
+    episode's total reward and environment state, and keep(environment state) every
+    keep_every steps (None without keep), stacked on a leading step axis.
 
     step_fn's rewards are per episode, (num_envs,), or per player in each episode,
     (num_envs, players) for a multi-player environment; the totals keep the same
@@ -131,11 +174,10 @@ def rollout(
 
     if keep is None:
         state = jax.lax.fori_loop(0, num_steps, lambda _, s: game_step(s), state)
-        return state.reward, None
-    state, frames = _scan_every(
+        return state, None
+    return _scan_every(
         game_step, state, num_steps, keep_every, lambda s: keep(s.env_state)
     )
-    return state.reward, frames
 
 
 def fitness(
@@ -151,7 +193,7 @@ def fitness(
     **kwargs,
 ) -> Tuple[jax.Array, Scores]:
     """Scores a population: each genome's total reward, averaged over num_episodes
-    episodes from different starts (see rollout for max_resets), and Scores with
+    episodes from different starts (see play for max_resets), and Scores with
     every episode's total and, if record, a Recording of every genome's first
     episode.
 
@@ -199,7 +241,7 @@ def test(
     **kwargs,
 ) -> Tuple[jax.Array, Any]:
     """Scores one genome: its mean total reward over num_episodes episodes from
-    different starts (see rollout for max_resets), and the environment state over the
+    different starts (see play for max_resets), and the environment state over the
     first frames_len steps of the first episode, every frames_every steps, to show
     it."""
 
@@ -269,18 +311,21 @@ def play_seated(
     record: bool = False,
     record_every: int = 1,
     record_fn: Optional[Callable] = None,
+    stats_fn: Optional[Callable] = None,
     **kwargs,
-) -> Tuple[jax.Array, Any]:
+) -> Tuple[jax.Array, Any, Dict[str, jax.Array]]:
     """Plays genomes against each other in num_games games of a multi-player
     environment: seated holds the genome in each seat, laid out as (games, seats)
-    and flattened. Returns each seat's total reward over num_steps (see rollout for
-    max_resets), and, if record, every game's environment state every record_every
-    steps (or what record_fn keeps of it), with leading (game, step) axes."""
+    and flattened. Returns each seat's total reward over num_steps (see play for
+    max_resets); if record, every game's environment state every record_every
+    steps (or what record_fn keeps of it), with leading (game, step) axes; and
+    stats_fn of the games' final environment state, stats by name of each seat,
+    (games, seats) (none without stats_fn)."""
 
     def policy(obs):
         return apply_seats(seated, obs, **kwargs)
 
-    rewards, frames = rollout(
+    state, frames = play(
         step_fn,
         reset_fn,
         rng,
@@ -291,7 +336,18 @@ def play_seated(
         keep=(record_fn or (lambda env_state: env_state)) if record else None,
         keep_every=record_every,
     )
-    return rewards, frames if frames is None else _episode_major(frames)
+    stats = {} if stats_fn is None else stats_fn(state.env_state)
+    frames = frames if frames is None else _episode_major(frames)
+    return state.reward, frames, stats
+
+
+def _mean_per_genome(ids: jax.Array, values: jax.Array, num_genomes: int) -> jax.Array:
+    """Each genome's mean of the finite values of the seats it played, NaN for a
+    genome with none: a stat that doesn't apply to some games (a lap time without a
+    lap) is the mean of the games it does."""
+    finite = jnp.isfinite(values)
+    zeros = jnp.zeros(num_genomes)
+    return zeros.at[ids].add(jnp.where(finite, values, 0.0)) / zeros.at[ids].add(finite)
 
 
 def fitness_mp(
@@ -311,7 +367,7 @@ def fitness_mp(
 ):
     """Each round shuffles the population into games of num_players. When the
     population doesn't divide evenly, the last game is filled with genomes that
-    also play elsewhere, so fitness is the mean reward per game played (see rollout
+    also play elsewhere, so fitness is the mean reward per game played (see play
     for max_resets). Also returns Scores with each genome's mean reward in each
     round (its one game, unless it filled a seat too) and, if record, a Recording
     of the first round's games.
@@ -336,7 +392,7 @@ def fitness_mp(
             ]
         )
         seated = jax.tree.map(lambda x: x[ids], genome)
-        rewards, frames = play_seated(
+        rewards, frames, _ = play_seated(
             step_fn,
             reset_fn,
             rng_game,
@@ -398,18 +454,20 @@ def fitness_mp_field(
     max_resets: Optional[int],
     record_every: int = 1,
     record_fn: Optional[Callable] = None,
+    stats_fn: Optional[Callable] = None,
     **kwargs,
-) -> Tuple[jax.Array, Any]:
+) -> Tuple[jax.Array, Any, Dict[str, jax.Array]]:
     """The batch of genomes all playing each other, num_games times: game g seats
     them g seats along from game 0, so that each plays from every seat as often
-    (see rollout for max_resets). Returns each genome's mean reward per game, and
-    game 0's environment state every record_every steps (or what record_fn keeps of it),
-    genome i in seat i."""
+    (see play for max_resets). Returns each genome's mean reward per game, game
+    0's environment state every record_every steps (or what record_fn keeps of
+    it), genome i in seat i, and each genome's mean of each stat stats_fn finds in
+    the games (see play_seated)."""
     num_players = genome.batch_size
     games, seats = np.arange(num_games)[:, None], np.arange(num_players)[None]
     ids = (seats + games) % num_players
     seated = jax.tree.map(lambda x: x[ids.ravel()], genome)
-    rewards, frames = play_seated(
+    rewards, frames, stats = play_seated(
         step_fn,
         reset_fn,
         rng,
@@ -420,10 +478,15 @@ def fitness_mp_field(
         record=True,
         record_every=record_every,
         record_fn=record_fn,
+        stats_fn=stats_fn,
         **kwargs,
     )
     totals = jnp.zeros(num_players).at[ids.ravel()].add(rewards.ravel())
-    return totals / num_games, jax.tree.map(lambda x: x[0], frames)
+    stats = {
+        k: _mean_per_genome(ids.ravel(), v.ravel(), num_players)
+        for k, v in stats.items()
+    }
+    return totals / num_games, jax.tree.map(lambda x: x[0], frames), stats
 
 
 def make_fitness_fn(
@@ -513,7 +576,10 @@ def make_mp_field_fn(
     max_resets: Optional[int] = 0,
     record_every: int = 1,
     record_fn: Optional[Callable] = None,
+    stats_fn: Optional[Callable] = None,
 ) -> Callable:
+    """A game of a batch of genomes against each other, for make_field_test (see
+    fitness_mp_field)."""
     assert num_games > 0, "num_games must be greater than 0"
     assert num_steps > 0, "num_steps must be greater than 0"
     assert max_resets is None or max_resets >= 0, "max_resets must be at least 0"
@@ -526,4 +592,5 @@ def make_mp_field_fn(
         max_resets=max_resets,
         record_every=record_every,
         record_fn=record_fn,
+        stats_fn=stats_fn,
     )
