@@ -66,9 +66,10 @@ const KERB_RED = "rgb(215, 30, 35)", KERB_WHITE = "rgb(245, 245, 245)";
 const START_AHEAD = 1.5, START_SQUARES = 8;
 const CHEQUER = ["rgb(25, 25, 25)", "rgb(245, 245, 245)"];
 // the strip along the bottom with each car's speed and steering, in pixels
-const HUD_H = 84, HUD_FONT = 9;
-// two rows on each card for its lap times, under the speed bar, in a smaller face
-const LAP_ROW = 20, LAP_FONT = `8px ui-monospace, "SF Mono", Menlo, monospace`;
+const HUD_H = 93, HUD_FONT = 9;
+// three rows on each card under the speed bar, in a smaller face: the distance it's
+// covered, then its lap times
+const LAP_ROW = 29, LAP_FONT = `8px ui-monospace, "SF Mono", Menlo, monospace`;
 // the fastest lap of the race so far, in purple as on the broadcasts (--s4)
 const FASTEST = "#5b3fb0";
 const FONT = `${HUD_FONT}px ui-monospace, "SF Mono", Menlo, monospace`;
@@ -614,7 +615,7 @@ function ellipse(ctx, x, y, r, fill, outline) {
 // shows them, scaled by arrays.limits: top speed, steering lock, and the speed lost
 // in a step of full braking, to show when and how hard each car brakes, in the
 // strip and on its rain light; and arrays.rewards, (steps, cars), each car's reward
-// so far, in metres, shown in the strip where there's room. With arrays.policy, the
+// so far, the metres it's covered, shown in the strip. With arrays.policy, the
 // policy's car, the rest are bots, and the camera follows the policy; without it,
 // every car is a member, in its seat's livery, and the camera follows the leader.
 // The camera follows the picked seat instead, when there is one.
@@ -748,12 +749,10 @@ export function f1tenth(arrays) {
       // the wheel, turned as far as the front wheels are, to full lock
       const turn = Math.min(Math.max(steer.data[t * cars + i] / maxSteer, -1), 1) * WHEEL_LOCK;
       wheel(ctx, x0 + r, hudTop + pad + r, r, turn, css(body), out);
-      // its place in the race, and its reward so far where there's room
-      let label = `P${place[t * cars + i] + 1}`;
-      if (rewards && roomy) label += ` · ${rewards.data[t * cars + i].toFixed(0)} m`;
+      // its place in the race
       ctx.fillStyle = out ? DIM : INK;
       ctx.textAlign = "left";
-      ctx.fillText(label, x0 + 2 * r + 4, hudTop + pad);
+      ctx.fillText(`P${place[t * cars + i] + 1}`, x0 + 2 * r + 4, hudTop + pad);
       // the brake lamp, at the top of the card
       const lit = brake >= BRAKING_FROM;
       ellipse(ctx, x1 - 4, hudTop + pad + 4, 3.5, css(lit ? BRAKE_ON : LAMP_OFF), lit ? css(BRAKE_OFF) : EDGE_SOFT);
@@ -782,13 +781,18 @@ export function f1tenth(arrays) {
         ctx.fillStyle = css(BRAKE_ON);
         ctx.fillRect(x0, barY + 6, brake * (x1 - x0), 2);
       }
+      // the distance it's covered, its reward, kept once it's out
+      ctx.font = LAP_FONT;
+      ctx.textAlign = "left";
+      if (rewards) {
+        ctx.fillStyle = out ? DIM : INK;
+        ctx.fillText(`${rewards.data[t * cars + i].toFixed(1)} m`, x0, barY + 10);
+      }
       // its lap times, once it's crossed the line: the one it's on, running, and
       // under it the last it finished, in purple if it's the fastest of the race
       // so far
       const done = crossings[i].filter((c) => c <= t);
-      const lapY = barY + 10;
-      ctx.font = LAP_FONT;
-      ctx.textAlign = "left";
+      const lapY = barY + 19;
       if (!out && done.length) {
         ctx.fillStyle = INK;
         ctx.fillText(`${roomy ? `L${done.length} ` : ""}${lapTime(t - done.at(-1))}`, x0, lapY);
