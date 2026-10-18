@@ -896,13 +896,14 @@ function listen(player) {
   return player;
 }
 
-// a member's species, from the name it was born with ("big-red-dog": the dog)
-// when the record doesn't say (members' episodes don't)
+// a member's species, when the record doesn't say (members' episodes don't):
+// the one named by a word of the name it was born with, wherever in it the
+// animal is ("big-red-dog", "minty-emu-412"), the last such word if several
 function birthSpecies(p) {
   if (p.birth_species != null) return p.birth_species;
-  const animal = p.name?.slice(p.name.lastIndexOf("-") + 1);
-  const found = Object.entries(state.speciesNames).find(([, name]) => name === animal);
-  return found ? Number(found[0]) : null;
+  const ids = new Map(Object.entries(state.speciesNames).map(([id, name]) => [name, Number(id)]));
+  const animal = (p.name ?? "").split("-").reverse().find((w) => ids.has(w));
+  return animal == null ? null : ids.get(animal);
 }
 
 // In a race whose view can say where each car's card is in its strip (f1tenth.js
@@ -914,7 +915,7 @@ function carNames(view, player, players, { self = null, at = null } = {}) {
   if (!view.slots || players.length !== view.cars) return false;
   const chips = players.map((p) => {
     const species = birthSpecies(p);
-    // "big-red-dog" on one line, in type sized to fill its card (fit, below)
+    // its whole name on one line, in type sized to fill its card (fit, below)
     const name = p.name || `#${p.id}`;
     const who = h("span", { class: "who", text: name, style: species != null ? `color:${speciesColor(species)}` : null });
     const title = `${name}${p.reward != null ? ` · ${p.reward.toFixed(1)} m` : ""}`;
