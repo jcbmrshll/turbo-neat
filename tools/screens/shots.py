@@ -40,8 +40,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 
-# the run each environment's showcase uses, as the site's export picks them
-# (lowrollr.github.io scripts/export_neat.py), from ~/turbo-neat-baselines/v2/runs
+# the run each environment's showcase on the site uses (README.md: the baseline's
+# neat-data), from ~/turbo-neat-baselines/v2/runs
 SHOWCASE = [
     ("f1tenth", "20261017-002705-b595"),
     ("slimevolley", "20261017-121215-59bf"),
