@@ -14,22 +14,22 @@ const MAP_W = 170, MARGIN = 8;
 // cars are drawn this many times life size, a little larger to stand out
 const CAR_SCALE = 1.5;
 
-// parodies of the 2026 F1 teams, one per seat, in their real liveries: a name, the
-// bodywork's colour, the wings', and for a split livery the colour of the body's
-// right flank. The first few look the most different, for races of a few cars; the
-// dashboard shows the same names and colours (dashboard.js)
+// eleven teams, one per seat, in liveries after F1's: a name, the bodywork's
+// colour, the wings', and for a split livery the colour of the body's right flank.
+// The first few look the most different, for races of a few cars; the dashboard
+// shows the same names and colours (dashboard.js)
 export const LIVERIES = [
-  ["Mclando", [255, 128, 0], [35, 35, 35], null], // McLaren
-  ["Vercedes", [185, 190, 196], [0, 161, 155], null], // Mercedes
-  ["Red Cow", [30, 45, 110], [220, 30, 50], null], // Red Bull
-  ["Berrari", [220, 0, 0], [245, 245, 245], null], // Ferrari
-  ["Billiams", [10, 50, 130], [240, 240, 240], null], // Williams
-  ["Racing Ducks", [240, 240, 245], [30, 70, 200], null], // Racing Bulls
-  ["Ostin Marlin", [0, 94, 70], [205, 230, 0], null], // Aston Martin
-  ["Yaas", [240, 240, 240], [220, 30, 40], null], // Haas
-  ["Audo", [150, 155, 160], [230, 30, 30], null], // Audi
-  ["Alpone", [0, 120, 220], [255, 135, 190], null], // Alpine
-  ["Chadillac", [230, 230, 225], [25, 25, 25], [25, 25, 25]], // Cadillac
+  ["Precision", [190, 195, 200], [25, 25, 25], null],
+  ["Rabbit Racing", [255, 120, 0], [30, 140, 60], null],
+  ["Orbital", [95, 45, 170], [200, 190, 240], null],
+  ["Richards", [0, 75, 45], [215, 180, 90], null],
+  ["Vettelli", [205, 0, 15], [245, 245, 245], null],
+  ["Blue Eagle", [25, 75, 195], [255, 200, 0], null],
+  ["Kessler", [30, 30, 32], [215, 25, 30], null],
+  ["Sakura", [245, 140, 185], [245, 245, 245], null],
+  ["Svea", [255, 205, 0], [0, 90, 170], null],
+  ["Monarch", [120, 20, 45], [205, 165, 50], [205, 165, 50]],
+  ["Riviera", [0, 150, 160], [240, 235, 220], null],
 ];
 
 // each car's livery: with a policy, the policy in the first and the bots in the
@@ -96,7 +96,6 @@ const GLYPH_TABLE = `
 A .###. #...# #...# ##### #...# #...# #...#
 B ####. #...# #...# ####. #...# #...# ####.
 C .#### #.... #.... #.... #.... #.... .####
-D ####. #...# #...# #...# #...# #...# ####.
 E ##### #.... #.... ####. #.... #.... #####
 G .#### #.... #.... #..## #...# #...# .####
 H #...# #...# #...# ##### #...# #...# #...#
@@ -112,18 +111,13 @@ S .#### #.... #.... .###. ....# ....# ####.
 T ##### ..#.. ..#.. ..#.. ..#.. ..#.. ..#..
 U #...# #...# #...# #...# #...# #...# .###.
 V #...# #...# #...# #...# #...# .#.#. ..#..
-W #...# #...# #...# #.#.# #.#.# ##.## #...#
-Y #...# #...# .#.#. ..#.. ..#.. ..#.. ..#..
 a .... .... .### ...# .### #..# .###
 c .... .... .### #... #... #... .###
 d ...# ...# .### #..# #..# #..# .###
-e .... .... .##. #..# #### #... .###
+h #... #... ###. #..# #..# #..# #..#
 i # . # # # # #
-l # # # # # # #
-n .... .... ###. #..# #..# #..# #..#
-o .... .... .##. #..# #..# #..# .##.
 r .... .... #.## ##.. #... #... #...
-w ..... ..... #...# #...# #.#.# #.#.# .#.#.
+s .... .... .### #... .##. ...# ###.
 `;
 const GLYPHS = Object.fromEntries(
   GLYPH_TABLE.trim()
@@ -161,6 +155,10 @@ function text(str, { spacing = 1, bold = false, italic = false } = {}) {
 
 const shift = (pixels, dx, dy) => pixels.map(([x, y]) => [x + dx, y + dy]);
 const rule = (x0, x1, y) => Array.from({ length: Math.max(0, x1 - x0) }, (_, i) => [x0 + i, y]);
+// the pixels of a picture drawn as rows of strings ("#" for a pixel), its top-left
+// corner at [x, y]
+const sprite = (rows, x, y) =>
+  rows.flatMap((row, dy) => [...row].flatMap((c, dx) => (c === "#" ? [[x + dx, y + dy]] : [])));
 
 // two lines of text, centered on each other, two pixels apart
 function stack([a, wa], [b, wb]) {
@@ -168,60 +166,95 @@ function stack([a, wa], [b, wb]) {
   return [shift(a, Math.floor((width - wa) / 2), 0), shift(b, Math.floor((width - wb) / 2), 9), width];
 }
 
-// each team's name in pixel art, styled after its real wordmark, on a plate in one
-// of its colours: {name: [the plate's colour, layers of [pixels, colour] painted in
+// each team's name in pixel art, with its emblem, on a plate in one of its
+// colours: {name: [the plate's colour, layers of [pixels, colour] painted in
 // order]}, each from its own top-left corner
 function wordmarks() {
   const marks = {};
   let t, w;
 
-  [t, w] = text("Mclando");
-  const swoosh = [[w + 1, 2], [w + 2, 1], [w + 3, 1], [w + 4, 0], [w + 5, 0], [w + 2, 2]];
-  marks["Mclando"] = [[255, 128, 0], [[t, [35, 35, 35]], [swoosh, [245, 245, 245]]]];
+  // a crosshair on the O
+  [t, w] = text("PRECISION");
+  const o = text("PRECISI")[1] + 3;
+  const crosshair = [[o, -3], [o, -2], [o, 3], [o, 8], [o, 9]];
+  marks["Precision"] = [[20, 20, 22], [[t, [190, 195, 200]], [crosshair, [0, 200, 220]]]];
 
-  [t, w] = text("VERCEDES");
-  marks["Vercedes"] = [[20, 20, 20], [[t, [0, 161, 155]], [rule(0, w, 8), [150, 155, 165]]]];
-
-  // the sun above the name
-  [t, w] = text("Red Cow", { bold: true, italic: true });
-  const half = Math.floor(w / 2), sun = [];
-  for (let x = half - 3; x < half + 4; x++) {
-    for (let y = -7; y < 0; y++) if ((x - half) ** 2 + (y + 4) ** 2 <= 10) sun.push([x, y]);
-  }
-  marks["Red Cow"] = [[30, 45, 110], [[sun, [255, 200, 0]], [t, [220, 30, 50]]]];
-
-  [t, w] = text("Berrari", { italic: true });
-  const sweep = shift(rule(4, w + 1, 0), 2, 0);
-  marks["Berrari"] = [[255, 205, 0], [[[...t, ...sweep], [25, 25, 25]]]];
-
-  [t, w] = text("BILLIAMS");
-  marks["Billiams"] = [[10, 50, 130], [[t, [240, 240, 240]], [rule(0, w, 8), [100, 170, 240]]]];
-
-  const [racing, ducks] = stack(text("RACING"), text("DUCKS", { bold: true }));
-  marks["Racing Ducks"] = [[240, 240, 245], [[racing, [30, 70, 200]], [ducks, [220, 30, 40]]]];
-
-  const [aston, marlin] = stack(text("OSTIN"), text("MARLIN"));
-  const left = Math.min(...aston.map(([x]) => x)), right = Math.max(...aston.map(([x]) => x));
-  // a wing either side of the top line, swept up
-  const wings = [[left - 2, 2], [left - 3, 2], [left - 3, 1], [left - 4, 1]];
-  wings.push([right + 2, 2], [right + 3, 2], [right + 3, 1], [right + 4, 1]);
-  marks["Ostin Marlin"] = [[0, 94, 70], [[[...aston, ...marlin], [240, 240, 240]], [wings, [205, 230, 0]]]];
-
-  [t, w] = text("YAAS", { bold: true });
-  marks["Yaas"] = [[240, 240, 240], [[shift(t, 1, 1), [25, 25, 25]], [t, [220, 30, 40]]]];
-
-  [t, w] = text("AUDO", { spacing: 3 });
-  marks["Audo"] = [[25, 25, 25], [[t, [230, 30, 30]], [rule(0, w, 8), [150, 155, 165]]]];
-
-  [t, w] = text("ALPONE", { italic: true });
-  marks["Alpone"] = [[0, 120, 220], [[t, [240, 240, 240]], [rule(0, w, 8), [255, 135, 190]]]];
-
-  [t, w] = text("CHADILLAC");
-  const mid = Math.floor(w / 2);
-  marks["Chadillac"] = [
-    [25, 25, 25],
-    [[t, [230, 230, 225]], [rule(0, mid, 8), [230, 230, 225]], [rule(mid, w, 8), [110, 110, 110]]],
+  // a rabbit's ears above the name, in carrot colours
+  const [rabbit, racing, rw] = stack(text("RABBIT", { bold: true }), text("RACING"));
+  const ears = sprite([".#.....#.", "###...###", "#.#...#.#", "#.#...#.#", "#.#...#.#", ".#.....#."], Math.floor(rw / 2) - 4, -7);
+  const insides = sprite([".#.....#.", ".#.....#.", ".#.....#."], Math.floor(rw / 2) - 4, -5);
+  marks["Rabbit Racing"] = [
+    [255, 120, 0],
+    [[[...rabbit, ...ears], [250, 250, 250]], [insides, [255, 185, 195]], [racing, [15, 80, 35]]],
   ];
+
+  // a ringed planet before the name
+  [t, w] = text("ORBITAL");
+  const planet = sprite([".###.", "#####", "#####", "#####", ".###."], -2, 1);
+  const ring = sprite(["............#", ".###########.", "#............"], -6, 2);
+  marks["Orbital"] = [
+    [20, 18, 50],
+    [[planet, [245, 190, 60]], [ring, [200, 190, 240]], [shift(t, 9, 0), [200, 190, 240]]],
+  ];
+
+  // a coachbuilder's badge, between gold rules
+  [t, w] = text("Richards");
+  marks["Richards"] = [[0, 75, 45], [[t, [235, 220, 170]], [[...rule(0, w, -2), ...rule(0, w, 8)], [215, 180, 90]]]];
+
+  // over the tricolore
+  [t, w] = text("VETTELLI", { bold: true, italic: true });
+  const third = Math.round(w / 3);
+  marks["Vettelli"] = [
+    [25, 25, 25],
+    [
+      [t, [235, 25, 35]],
+      [rule(0, third, 8), [0, 140, 70]],
+      [rule(third, w - third, 8), [245, 245, 245]],
+      [rule(w - third, w, 8), [205, 0, 15]],
+    ],
+  ];
+
+  // an eagle's wings spread above the name
+  const [blue, eagle, bw] = stack(text("BLUE"), text("EAGLE", { bold: true }));
+  const spread = sprite(
+    ["#.............#", "##...........##", ".###...#...###.", "..####.#.####..", "....#######....", "......###......"],
+    Math.floor(bw / 2) - 7,
+    -7,
+  );
+  marks["Blue Eagle"] = [[25, 75, 195], [[[...blue, ...eagle], [250, 250, 250]], [spread, [255, 200, 0]]]];
+
+  // a shield before the name
+  [t, w] = text("KESSLER");
+  const shield = sprite(["#####", "#...#", "#...#", "#...#", ".#.#.", "..#.."], 0, 0);
+  const field = sprite([".###.", ".###.", ".###.", "..#.."], 0, 1);
+  marks["Kessler"] = [
+    [30, 30, 32],
+    [[shield, [215, 170, 40]], [field, [215, 25, 30]], [shift(t, 8, 0), [240, 240, 240]]],
+  ];
+
+  // a cherry blossom before the name
+  [t, w] = text("SAKURA");
+  const petals = sprite([".#.#.", "##.##", ".....", "##.##", ".#.#."], 0, 1);
+  marks["Sakura"] = [
+    [245, 245, 245],
+    [[petals, [245, 140, 185]], [[[2, 3]], [205, 40, 110]], [shift(t, 7, 0), [225, 70, 140]]],
+  ];
+
+  // the name beside a flag, its Nordic cross the plate showing through
+  [t, w] = text("SVEA", { bold: true });
+  const flag = sprite(["##.#####", "##.#####", "........", "##.#####", "##.#####"], 0, 1);
+  marks["Svea"] = [[255, 205, 0], [[[...flag, ...shift(t, 10, 0)], [0, 90, 170]]]];
+
+  // a crown above the name
+  [t, w] = text("MONARCH");
+  const crown = sprite(["#..#..#", "#.###.#", "#######"], Math.floor(w / 2) - 3, -5);
+  marks["Monarch"] = [[120, 20, 45], [[[...t, ...crown], [205, 165, 50]]]];
+
+  // between gold rules, the top one set with a diamond
+  [t, w] = text("RIVIERA", { spacing: 2 });
+  const c = Math.floor(w / 2);
+  const deco = [...rule(0, c - 2, -3), ...sprite([".#.", "#.#", ".#."], c - 1, -4), ...rule(c + 3, w, -3), ...rule(0, w, 8)];
+  marks["Riviera"] = [[240, 235, 220], [[t, [0, 120, 130]], [deco, [195, 160, 80]]]];
 
   for (const [name, [plate, layers]] of Object.entries(marks)) {
     const all = layers.flatMap(([pixels]) => pixels);
