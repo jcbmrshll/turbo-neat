@@ -289,7 +289,7 @@ export function descentView(data, width, { lim = null } = {}) {
       ctx.stroke();
     }
 
-    // nodes as the network card draws them (style.css .net .node)
+    // nodes as the network card draws them (dashboard.css .net .node)
     ctx.font = font;
     nodeIds.forEach((n, i) => {
       const alpha = nodeOn[a][i] + (nodeOn[b][i] - nodeOn[a][i]) * t;

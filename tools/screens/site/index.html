@@ -18,7 +18,16 @@
     <link href="https://fonts.googleapis.com/css2?family=Kaisei+Tokumin&display=swap" rel="stylesheet" />
     <link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="globals.css" />
-    <link rel="stylesheet" href="neat.css" />
+    <script>
+      // the site's own stylesheet with its own dashboard; with the shared one, the
+      // site's around it and then the dashboard's, which wins where a rule of the
+      // page's (.neat-page a) is as specific as its own (.neat-dash a)
+      document.write(
+        new URLSearchParams(location.search).get("impl") === "fork"
+          ? '<link rel="stylesheet" href="neat-388a7e5.css" />'
+          : '<link rel="stylesheet" href="neat.css" /><link rel="stylesheet" href="/static/dashboard.css" />',
+      );
+    </script>
   </head>
   <body>
     <div class="neat-page">

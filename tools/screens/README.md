@@ -22,9 +22,12 @@ in the edge of a slider's knob. Shoot one target at a time.
 - `site`: the /neat page of a running build of the site (`--url`). The shot is
   the dashboard's element, `.neat-dash`.
 - `harness`: `site/index.html`, the dashboard in a page laid out like /neat (the
-  site's `globals.css` and `neat.css`, copied verbatim, its fonts, its intro and
-  environment tabs), reading the site's export of the runs (`--data`). With
-  `--fork <site>/app/neat/dashboard` it mounts the site's own dashboard, which
+  site's `globals.css`, its fonts, its intro and environment tabs), reading the
+  site's export of the runs (`--data`). It mounts this checkout's dashboard with
+  the site's options (`site/preset.js`) and stylesheets: `site/neat.css`, the
+  page around the dashboard as the site is to keep it, then `dashboard.css`.
+  With `--fork <site>/app/neat/dashboard` it mounts the site's own dashboard
+  with its own stylesheet (`site/neat-388a7e5.css`, verbatim) instead, which
   shoots exactly as the site does: that's what makes the harness a stand-in for
   the site.
 
