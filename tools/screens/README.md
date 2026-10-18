@@ -9,8 +9,9 @@ For each environment's showcase run it shoots the run's tab at the last epoch
 through (`epoch`), and the tab of the member at the top of the population
 (`member`): 24 shots a target. `freeze.js` stops the clock, the episodes and
 `Math.random` first, and every episode is paused at the same frame, so an unchanged
-dashboard shoots the same every time. Shoot one target at a time: a capture run
-alongside another has once drawn a slider's knob a shade differently.
+dashboard shoots the same every time; the page is painted afresh before each shot,
+as what was painted while it came together can otherwise leave a shade's difference
+in the edge of a slider's knob. Shoot one target at a time.
 
 `./shots` runs `shots.py` with what it needs (Playwright, its browser pinned).
 

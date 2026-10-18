@@ -140,7 +140,9 @@ def fit_height(page, target):
     """Make the window tall enough that nothing scrolls, so a shot shows it all."""
     for _ in range(6):
         if target == "monitor":
-            over = page.evaluate("(() => { const m = document.getElementById('main'); return m.scrollHeight - m.clientHeight; })()")
+            # what scrolls: the dashboard's main column, or before it filled the
+            # window with the leaderboard beside it, the window's main area
+            over = page.evaluate("(() => { const m = document.querySelector('.nd-main') || document.getElementById('main'); return m.scrollHeight - m.clientHeight; })()")
         else:
             over = page.evaluate("document.documentElement.scrollHeight - innerHeight")
         if over <= 0:
@@ -185,6 +187,15 @@ def shoot(page, target, path):
     """The dashboard: the whole window for the monitor, its own element for the site.
     Shot twice, until two shots in a row agree."""
     take = (lambda: page.screenshot()) if target == "monitor" else (lambda: page.locator(".neat-dash").first.screenshot())
+    # painted afresh: what was painted while the page came together can leave a
+    # shade's difference in the edges of a slider's knob
+    page.evaluate("""async () => {
+      const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      document.documentElement.style.visibility = "hidden";
+      await frame();
+      document.documentElement.style.visibility = "";
+      await frame();
+    }""")
     last = take()
     for _ in range(10):
         time.sleep(0.3)
