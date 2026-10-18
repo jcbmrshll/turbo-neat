@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# shots.py with what it needs (its browser pinned, so screenshots compare across runs)
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+uv run --no-project --with playwright==1.64.0 --with numpy --with pillow \
+    python -m playwright install chromium-headless-shell >/dev/null
+exec uv run --no-project --with playwright==1.64.0 --with numpy --with pillow \
+    python "$here/shots.py" "$@"
