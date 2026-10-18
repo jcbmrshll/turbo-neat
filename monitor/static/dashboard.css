@@ -67,7 +67,7 @@
 }
 .neat-dash:not(.nd-fill) .nd-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
+  grid-template-columns: minmax(0, 1fr) 360px;
   gap: 0 20px;
   align-items: start;
 }
@@ -97,7 +97,7 @@
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
 }
-.neat-dash.nd-fill .nd-layout.has-board { grid-template-columns: minmax(0, 1fr) 400px; }
+.neat-dash.nd-fill .nd-layout.has-board { grid-template-columns: minmax(0, 1fr) 360px; }
 .neat-dash.nd-fill .nd-main {
   overflow-y: auto;
   padding: 22px 28px 60px;
@@ -443,7 +443,11 @@
 .neat-dash .nd-board .board td { padding: 3px 5px; }
 .neat-dash .nd-board .board th:first-child, .neat-dash .nd-board .board td:first-child { padding-left: 12px; }
 .neat-dash .nd-board .board th:last-child, .neat-dash .nd-board .board td:last-child { padding-right: 12px; }
-.neat-dash .nd-board .board td.who { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+/* the name takes what the numbers leave it; a long one gives up its species,
+   not the number that tells it from its kin */
+.neat-dash .nd-board .board td.who { width: 100%; max-width: 0; overflow: hidden; }
+.neat-dash .nd-board .board td.who .gname { display: inline-flex; max-width: calc(100% - 15px); vertical-align: bottom; }
+.neat-dash .nd-board .board td.who .sp { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .neat-dash .nd-board .board tr.open td.rank { box-shadow: inset 2px 0 var(--edge-hot); }
 .neat-dash .nd-board .board tr.sel td.rank { box-shadow: inset 2px 0 var(--accent); }
 .neat-dash table.board {
