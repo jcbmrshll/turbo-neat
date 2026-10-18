@@ -14,18 +14,6 @@ const POLL_MS = 2000;
 const RUNS_POLL_MS = 5000;
 // a running run that hasn't logged for this long is probably dead
 const STALE_S = 180;
-// the stat tiles, in order, when the run logs them; "max_*" stands for the best
-// score of each of the run's tests, e.g. max_fitness_against_baseline, and
-// fitness_against_baseline is what runs logged before tests named their metrics
-const HEADLINE = [
-  "max_fitness",
-  "mean_fitness",
-  "max_*",
-  "fitness_against_baseline",
-  "num_species",
-  "mean_condensed_hidden_nodes",
-  "mean_condensed_connections",
-];
 // charts that lead the grid; the rest follow in the order they were first logged
 const CHART_ORDER = ["fitness", "fitness_against_baseline"];
 const BOARD_LIMIT = 50;
@@ -265,7 +253,6 @@ async function select(runId) {
     epochBar: epochBar(),
     overview: h("div", { class: "tab-panel" }),
     panels: h("div"),
-    tiles: h("div", { class: "tiles" }),
     media: h("div", { class: "media-grid" }),
     chartsTitle: h("div", { class: "stitle-row" }),
     charts: h("div", { class: "chart-grid" }),
@@ -274,7 +261,6 @@ async function select(runId) {
     mediaCards: {},
   };
   view.overview.append(
-    view.tiles,
     view.media,
     view.chartsTitle,
     view.charts,
@@ -315,7 +301,6 @@ async function pollRun() {
     if (firstLoad) renderConfig();
     if (firstLoad || metrics.rows.length) {
       view.epochBar.update();
-      renderTiles();
       if (state.activeTab == null) renderCharts();
       else state.overviewStale = true;
     }
@@ -380,33 +365,24 @@ function latest(key) {
   return null;
 }
 
-function renderTiles() {
-  const tests = metricKeys().filter((k) => k.startsWith("max_") && !HEADLINE.includes(k));
-  const keys = HEADLINE.flatMap((k) => (k === "max_*" ? tests : [k]));
-  const tiles = keys.filter((k) => latest(k) != null).map((k) =>
-    h(
-      "div",
-      { class: "tile" },
-      h("div", { class: "lab", text: k.replaceAll("_", " ") }),
-      h("div", { class: "val", text: fmt(latest(k)) }),
-    ),
-  );
-  view.tiles.replaceChildren(...tiles);
-  view.tiles.hidden = !tiles.length;
+// a metric's value in the epoch shown, or null if it wasn't logged then
+function valueAt(key) {
+  const step = state.epoch ?? state.rows.at(-1)?.step;
+  return state.rows.find((r) => r.step === step)?.[key] ?? null;
 }
 
 // ---------------------------------------------------------------- epoch
 
-// each chart's epoch line, to move without redrawing the chart
-const chartMarkers = [];
+// what each chart shows of the epoch shown (its epoch line, its values), to
+// update without redrawing the chart
+const chartUpdates = [];
 
 // show the run as it was at an epoch (null: the latest, following new ones)
 function setEpoch(epoch) {
   const last = state.rows.at(-1)?.step;
   state.epoch = epoch == null || epoch >= last ? null : epoch;
   view.epochBar.update();
-  renderTiles();
-  chartMarkers.forEach((place) => place());
+  chartUpdates.forEach((update) => update());
   renderMedia();
   clearTimeout(setEpoch.board);
   // dragging the slider asks for the leaderboard once it settles
@@ -511,7 +487,7 @@ function singleSpecies() {
 }
 
 function renderCharts() {
-  chartMarkers.length = 0;
+  chartUpdates.length = 0;
   const oneSpecies = singleSpecies();
   const groups = groupMetrics(metricKeys()).filter((g) => !(oneSpecies && g.name.startsWith("species_")));
   view.chartsTitle.hidden = !groups.length;
@@ -572,14 +548,22 @@ function chartCard(group, from) {
       points: state.rows.filter((r) => r[s.key] != null && r.step >= from).map((r) => [r.step, r[s.key]]),
     };
   });
-  const single = series.length === 1;
-  return seriesCard(group.name.replaceAll("_", " "), series, single && fmt(latest(series[0].key)));
+  // a species' value is its value in the epoch shown, so one that died out (or
+  // hasn't appeared yet) has none; any other metric's, its latest (tests log
+  // only every so often)
+  const species = group.name.startsWith("species_");
+  return seriesCard(group.name.replaceAll("_", " "), series, (key) => (species ? valueAt(key) : latest(key)));
 }
 
-// a card with a line chart of the series ([step, value] points), a legend when
-// there's more than one, and `latestText` in the corner if given
-function seriesCard(title, series, latestText) {
+// a card with a line chart of the series ([step, value] points) and each one's
+// value(key) as of the epoch shown: in the corner for one series, beside each
+// name in the legend for several
+function seriesCard(title, series, value) {
   const single = series.length === 1;
+  const values = series.map(() => h("b"));
+  const update = () => series.forEach((s, i) => (values[i].textContent = fmt(value(s.key))));
+  update();
+  chartUpdates.push(update);
   const card = h(
     "div",
     { class: "card chart-card" },
@@ -588,14 +572,14 @@ function seriesCard(title, series, latestText) {
       { class: "card-hdr" },
       h("span", { class: "title", text: title }),
       h("span", { class: "spacer" }),
-      latestText && h("span", { class: "latest", text: latestText }),
+      single && h("span", { class: "latest" }, values[0]),
     ),
     !single &&
       h(
         "div",
         { class: "legend" },
-        series.map((s) =>
-          h("span", { class: "key" }, h("i", { style: `background:${s.color}` }), s.name),
+        series.map((s, i) =>
+          h("span", { class: "key" }, h("i", { style: `background:${s.color}` }), s.name, values[i]),
         ),
       ),
   );
@@ -673,7 +657,7 @@ function lineChart(series, width) {
     }
   };
   placeMark();
-  chartMarkers.push(placeMark);
+  chartUpdates.push(placeMark);
   svg.append(mark);
 
   // hover: a crosshair snapped to the nearest logged step, every series in one tooltip;
@@ -1374,8 +1358,8 @@ function renderBoard() {
   // rebuilding the species list while it's open would close it
   const choosing = top.contains(document.activeElement) && document.activeElement.tagName === "SELECT";
   top.replaceChildren(
-    h("div", { class: "stitle", text: "Leaderboard" }),
-    h("div", { class: "bp-sub", text: `epoch ${board.step} · ${board.population} members · ${board.total.toLocaleString("en")} seen` }),
+    h("div", { class: "stitle", text: "Population" }),
+    h("div", { class: "bp-sub", text: `epoch ${board.step} · ${board.population} members` }),
     choosing ? top.querySelector(".bp-controls") : h("div", { class: "bp-controls" }, scopes, filter),
   );
   const scrolled = wrap.scrollTop;
