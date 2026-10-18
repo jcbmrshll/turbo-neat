@@ -1584,7 +1584,7 @@ export function mountDashboard(root, options) {
       h("th", { class: "rank", text: "#" }),
       h("th", { text: "individual" }),
       h("th", { class: "num", text: "fitness", title: `fitness in its latest ${w.step}` }),
-      allTime && h("th", { class: "num", text: "generation", title: generations ? "the generation it was born into" : "the generation it was born into: the epoch it joined the population" }),
+      allTime && h("th", { class: "num", text: "born", title: generations ? "the generation it was born into" : "the generation it was born into: the epoch it joined the population" }),
       h("th", { class: "num", text: generations ? "age" : "epochs", title: `${w.steps} in the population` }),
       h("th", { class: "num", text: "offspring" }),
     );
