@@ -104,6 +104,8 @@ class RaceState:
     racing_steps: jax.Array
     speed_sum: jax.Array
     top_speed: jax.Array
+    # whether each car is out from touching another car (racing or a wreck)
+    car_crashes: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -181,10 +183,11 @@ class F1TenthRace:
                 lambda p: get_vertices(p, length=params.length, width=params.width)
             )(poses)
 
-        def settle(state: State) -> State:
+        def settle(state: State) -> Tuple[State, jax.Array]:
             """Crashes: a car that hits a wall during this step goes back to the last
             place along it that was clear and stops there, and any car touching a
-            wall or another car, or off the track, is out of the race."""
+            wall or another car, or off the track, is out of the race. Also returns
+            which cars are touching another car."""
             last = state.last_cartesian_states[:, [0, 1, 4]]
             pose = state.cartesian_states[:, [0, 1, 4]]
             fractions = jnp.linspace(0, 1, wall_checks + 1)
@@ -223,9 +226,10 @@ class F1TenthRace:
             i, j = np.triu_indices(num_cars, 1)
             pairs = jax.vmap(collision)(jnp.concatenate((corners[i], corners[j]), -1))
             hit_car = jnp.zeros(num_cars, bool).at[i].max(pairs).at[j].max(pairs)
-            return state.replace(
+            state = state.replace(
                 collisions=state.collisions | hit_wall | off_track | hit_car
             )
+            return state, hit_car
 
         def progress(state: State) -> jax.Array:
             """Metres each car advanced along the track this step, as the env's own
@@ -324,6 +328,7 @@ class F1TenthRace:
                 racing_steps=zeros,
                 speed_sum=jnp.zeros(num_cars),
                 top_speed=jnp.zeros(num_cars),
+                car_crashes=jnp.zeros(num_cars, bool),
             )
 
         def step_fn(state: RaceState, actions: jax.Array):
@@ -337,7 +342,7 @@ class F1TenthRace:
             )
             # the car that crashes this step keeps the progress it made up to the
             # crash, and the env freezes it in place from the next
-            env_state = settle(env_state)
+            env_state, hit_car = settle(env_state)
             distance = progress(env_state)
             total = state.rewards + distance
             # the reward is the distance, less crash_penalty on the step a car crashes
@@ -369,14 +374,16 @@ class F1TenthRace:
                 racing_steps=state.racing_steps + racing,
                 speed_sum=state.speed_sum + speed,
                 top_speed=jnp.maximum(state.top_speed, speed),
+                car_crashes=state.car_crashes | (crashed & hit_car),
             )
             return state, rewards, env_state.collisions.all()
 
         def stats(state: RaceState) -> dict:
             """Each car's average lap time in seconds over the laps it completed
             (NaN without one), how many times it passed a car still racing,
-            whether it crashed, and its average and top speed while it was still
-            racing (NaN if it never was): of a race, or a batch of races."""
+            whether it crashed, and whether into another car, and its average and
+            top speed while it was still racing (NaN if it never was): of a race,
+            or a batch of races."""
             raced = state.racing_steps > 0
             return dict(
                 lap_time=jnp.where(
@@ -386,6 +393,7 @@ class F1TenthRace:
                 ),
                 passes=state.passes.astype(jnp.float32),
                 crashes=state.env_state.collisions.astype(jnp.float32),
+                car_crashes=state.car_crashes.astype(jnp.float32),
                 avg_speed=jnp.where(
                     raced,
                     state.speed_sum / jnp.maximum(state.racing_steps, 1),
@@ -710,6 +718,13 @@ def main():
         help="metres between places on the starting grid",
     )
     parser.add_argument(
+        "--test-grid-spacing",
+        type=float,
+        default=None,
+        help="metres between places on the test races' starting grid, if not "
+        "--grid-spacing",
+    )
+    parser.add_argument(
         "--crash-penalty",
         type=float,
         default=0.0,
@@ -743,10 +758,18 @@ def main():
     # just stand there, so score straight through and keep the last crash in replays
     max_resets = None
     test_steps = round((args.test_seconds or args.race_seconds) / race.dt)
+    test_race = race
+    if args.test_grid_spacing is not None:
+        test_race = F1TenthRace(
+            args.cars,
+            map_name=args.map,
+            max_speed=args.max_speed,
+            grid_spacing=args.test_grid_spacing,
+        )
     if args.test == "bots":
         test_fn = make_top_k_test(
             make_test_fn(
-                RaceAgainstBots(race),
+                RaceAgainstBots(test_race),
                 num_steps=test_steps,
                 num_episodes=args.field_races,
                 frames_every=race.record_every,
@@ -756,13 +779,13 @@ def main():
     else:
         test_fn = make_field_test(
             make_mp_field_fn(
-                race,
+                test_race,
                 args.field_races,
                 test_steps,
                 max_resets=max_resets,
                 record_every=race.record_every,
                 record_fn=race.record_frame,
-                stats_fn=race.stats,
+                stats_fn=test_race.stats,
             ),
             size=args.cars,
             # just their stats: distance is what fitness already logs
