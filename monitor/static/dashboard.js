@@ -1,9 +1,9 @@
 // The NEAT dashboard: a run's charts, its test episodes played beside the networks
 // playing them, the species map, the population's leaderboard, and a tab per member
 // opened, with its network, episodes, line of descent and lineage. The run monitor
-// (app.js) draws it around its own run list; lowrollr.github.io's /neat draws it
-// for runs exported as static files. Where the run comes from is a source
-// (sources.js); how it differs between the two is an option.
+// (app.js) draws it around its own run list; a static page can draw it for runs
+// exported as static files (python -m monitor.export). Where the run comes from is
+// a source (sources.js); how it differs between the two is an option.
 // No framework; every view is plain DOM built with h(), and labels that come from a
 // run (metric names, config values) only ever go in as text.
 //

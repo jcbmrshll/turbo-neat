@@ -1,5 +1,5 @@
 """Export finished runs as static files, for the dashboard to show them without a
-server (monitor/static/sources.js staticSource), as lowrollr.github.io's /neat does.
+server (monitor/static/sources.js staticSource), e.g. on a static site.
 
 The run monitor's server answers the dashboard from a run's folder on demand. A
 static site can't, so this precomputes what the dashboard asks for, using the
@@ -19,7 +19,7 @@ monitor's own code, and writes it under <out>/<key>/ for each KEY=RUN_ID given:
 and <out>/index.json, a summary of each run, in the order given. The dashboard
 reads <out>/<key> with staticSource(base).
 
-    python -m monitor.export --runs ~/turbo-neat-baselines/v2/runs --out public/neat-data \
+    python -m monitor.export --runs runs --out export \
         cartpole=20261017-003025-7bad f1tenth=20261017-002705-b595 ...
 """
 
