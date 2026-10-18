@@ -484,20 +484,20 @@ function listen(player) {
 }
 
 // which seat each player of a game had, in the renderers' colours: the sides of a
-// two-player game, or a race's places on the grid, each car a parody of a 2026 team
-// in its livery (f1tenth.js LIVERIES), with an edge so the white cars show
+// two-player game, or a race's places on the grid, each car a team in its livery
+// (f1tenth.js LIVERIES), with an edge so the light cars show
 const LIVERIES = [
-  ["Mclando", "#ff8000"],
-  ["Vercedes", "#b9bec4"],
-  ["Red Cow", "#1e2d6e"],
-  ["Berrari", "#dc0000"],
-  ["Billiams", "#0a3282"],
-  ["Racing Ducks", "#f0f0f5"],
-  ["Ostin Marlin", "#005e46"],
-  ["Yaas", "#f0f0f0"],
-  ["Audo", "#969ba0"],
-  ["Alpone", "#0078dc"],
-  ["Chadillac", "linear-gradient(90deg, #e6e6e1 50%, #191919 50%)"],
+  ["Precision", "#bec3c8"],
+  ["Rabbit Racing", "#ff7800"],
+  ["Orbital", "#5f2daa"],
+  ["Richards", "#004b2d"],
+  ["Vettelli", "#cd000f"],
+  ["Blue Eagle", "#194bc3"],
+  ["Kessler", "#1e1e20"],
+  ["Sakura", "#f58cb9"],
+  ["Svea", "#ffcd00"],
+  ["Monarch", "linear-gradient(90deg, #78142d 50%, #cda532 50%)"],
+  ["Riviera", "#0096a0"],
 ];
 const SEATS = {
   f1tenth_field: (seat) => SEATS.f1tenth(seat),
