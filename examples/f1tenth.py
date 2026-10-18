@@ -645,7 +645,7 @@ def main():
     parser = argparse.ArgumentParser(description="Race F1TENTH cars by self-play.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=1000)
-    parser.add_argument("--cars", type=int, default=11, help="cars in each race")
+    parser.add_argument("--cars", type=int, default=6, help="cars in each race")
     parser.add_argument("--map", default="Spielberg", help="an F1TENTH track")
     parser.add_argument(
         "--race-seconds", type=float, default=20.0, help="length of a race"
