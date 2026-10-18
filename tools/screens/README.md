@@ -35,9 +35,15 @@ in the edge of a slider's knob. Shoot one target at a time.
 
 In `~/turbo-neat-dash-baseline` (outside the repo, the shots are ~19 MB):
 
-- `neat-data/`: the site's export of the runs, from its `scripts/export_neat.py`
-  at lowrollr.github.io 388a7e5 with this checkout's monitor. It's byte for byte
-  what the site serves from GCS.
+- `neat-data/`: the showcase runs exported for the site, byte for byte what it
+  serves from GCS. Made by its `scripts/export_neat.py` at 388a7e5; now
+  `python -m monitor.export` makes the same files:
+
+      uv run --no-project --with numpy python -m monitor.export \
+          --runs ~/turbo-neat-baselines/v2/runs --out ~/turbo-neat-dash-baseline/neat-data \
+          cartpole=20261017-003025-7bad f1tenth=20261017-002705-b595 \
+          spiral=20261017-132140-b4e4 xor=20261017-002703-340b \
+          boids=20261017-141452-a065 slimevolley=20261017-121215-59bf
 - `shots/monitor/`: `./shots capture monitor` at turbo-neat f7837d6.
 - `shots/site/`: `./shots capture site` of lowrollr.github.io 388a7e5, built
   with its data read from `neat-data`:
