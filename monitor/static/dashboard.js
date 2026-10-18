@@ -28,6 +28,9 @@
 //   memberHref(id)   the address of a member's tab, for its links
 //   chartWindow      the epochs the charts show to begin with (null: all)
 //   onChartWindow(n) the reader picked another
+//   boardOpen        the population panel open to begin with, not folded to a
+//                    strip at the side (false)
+//   onBoardOpen(on)  the reader opened or folded it
 //   onRefresh()      the run was read
 //   onError(e)       reading it failed; without it, a first read that fails says
 //                    so in place of the dashboard
@@ -561,6 +564,7 @@ export function mountDashboard(root, options) {
     onTab = null,
     onTabs = null,
     onChartWindow = null,
+    onBoardOpen = null,
     onRefresh = null,
     onError = null,
   } = options;
@@ -584,6 +588,8 @@ export function mountDashboard(root, options) {
     // the species the leaderboard shows, or null for all of them
     boardSpecies: null,
     speciesNames: {},
+    // the panel open, or folded to a strip at the side
+    boardOpen: Boolean(options.boardOpen),
     // the open member tabs, in order (see openTab), and the one shown: a genome id,
     // or null for the run's own tab
     tabs: [],
@@ -604,7 +610,7 @@ export function mountDashboard(root, options) {
 
   const main = h("div", { class: "nd-main" });
   const boardEl = h("aside", { class: "nd-board" });
-  const layout = h("div", { class: "nd-layout" }, main, boardEl);
+  const layout = h("div", { class: ["nd-layout", !state.boardOpen && "board-shut"].filter(Boolean).join(" ") }, main, boardEl);
   root.replaceChildren(layout);
   root.classList.add("neat-dash");
   // dashboard.css lays it out filling root, or in the page
@@ -1069,10 +1075,11 @@ export function mountDashboard(root, options) {
     return svg;
   }
 
-  // redraw what's drawn to fit when the dashboard changes width
+  // redraw what's drawn to fit when the main column changes width: the dashboard
+  // did, or the population panel opened or folded
   let lastWidth = 0, resizeTimer = null;
   const resized = new ResizeObserver(() => {
-    const width = root.clientWidth;
+    const width = main.offsetWidth;
     if (!lastWidth || Math.abs(width - lastWidth) < 2) {
       lastWidth = width;
       return;
@@ -1089,7 +1096,7 @@ export function mountDashboard(root, options) {
       }
     }, 150);
   });
-  resized.observe(root);
+  resized.observe(main);
 
   // redraw what the run tab draws to fit its width
   function relayoutOverview() {
@@ -1610,19 +1617,37 @@ export function mountDashboard(root, options) {
       const who = state.speciesNames[picked] ?? `s${picked}`;
       rows.push(h("tr", {}, h("td", { class: "dim", colspan: 6, text: `no ${who} ${allTime ? "yet" : `in this ${w.step}`}` })));
     }
-    // the table keeps its scroll from one epoch to the next
-    if (!boardEl.firstChild) boardEl.append(h("div", { class: "bp-head" }), h("div", { class: "bp-table" }));
-    const [top, wrap] = boardEl.children;
+    // the table keeps its scroll from one epoch to the next, folded or not
+    if (!boardEl.firstChild) {
+      boardEl.append(
+        h("div", { class: "bp-head" }),
+        h("div", { class: "bp-table" }),
+        h("button", { class: "bp-strip", title: "show the population", onclick: () => setBoardOpen(true) }),
+      );
+    }
+    const [top, wrap, strip] = boardEl.children;
+    strip.replaceChildren(h("span", { class: "fold", text: "‹" }), h("span", { class: "stitle", text: `Population · ${board.population}` }));
     // rebuilding the species list while it's open would close it
     const choosing = top.contains(document.activeElement) && document.activeElement.tagName === "SELECT";
     top.replaceChildren(
-      h("div", { class: "stitle", text: "Population" }),
+      h(
+        "div",
+        { class: "bp-title" },
+        h("div", { class: "stitle", text: "Population" }),
+        h("button", { class: "fold", text: "›", title: "fold the population away", onclick: () => setBoardOpen(false) }),
+      ),
       h("div", { class: "bp-sub", text: `${w.step} ${board.step} · ${board.population} members` }),
       choosing ? top.querySelector(".bp-controls") : h("div", { class: "bp-controls" }, scopes, filter),
     );
     const scrolled = wrap.scrollTop;
     wrap.replaceChildren(h("table", { class: "board" }, h("thead", {}, head), h("tbody", {}, rows)));
     wrap.scrollTop = scrolled;
+  }
+
+  function setBoardOpen(open) {
+    state.boardOpen = open;
+    layout.classList.toggle("board-shut", !open);
+    onBoardOpen?.(open);
   }
 
   // ------------------------------------------------------------ tabs
