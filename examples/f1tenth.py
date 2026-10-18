@@ -8,12 +8,13 @@ cars around it.
 
 To see how good the best are, every --test-every generations the --cars fittest
 race each other (--field-races races, starting from every place on the grid in
-turn), and the monitor shows one of their races and logs three stats of each car in
+turn), and the monitor shows one of their races and logs five stats of each car in
 them: its average lap time in seconds, over the laps it completed (a lap being the
 track's length from its place on the grid), how many times it passed a car that was
-still racing, and whether it crashed. Each is the car's mean over the races (lap
-time over those it completed a lap in), and the monitor charts the mean, least and
-most over the cars (lap_time, passes, crashes). With --test bots, the 10 fittest
+still racing, whether it crashed, and its average and top speed in m/s while it was
+still racing. Each is the car's mean over the races (lap time over those it
+completed a lap in), and the monitor charts the mean, least and most over the cars
+(lap_time, passes, crashes, avg_speed, top_speed). With --test bots, the 10 fittest
 each race pure pursuit bots that follow the track's centerline instead, scoring the
 distance they cover, and the monitor shows the best one's race.
 
@@ -98,6 +99,11 @@ class RaceState:
     lap_steps: jax.Array
     # how many times each car passed (or lapped) a car still in the race
     passes: jax.Array
+    # each car's steps still racing, the sum of its speeds over them, and the
+    # fastest of them, in m/s
+    racing_steps: jax.Array
+    speed_sum: jax.Array
+    top_speed: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -314,6 +320,9 @@ class F1TenthRace:
                 laps=zeros,
                 lap_steps=zeros,
                 passes=zeros,
+                racing_steps=zeros,
+                speed_sum=jnp.zeros(num_cars),
+                top_speed=jnp.zeros(num_cars),
             )
 
         def step_fn(state: RaceState, actions: jax.Array):
@@ -335,6 +344,9 @@ class F1TenthRace:
             laps = jnp.maximum(
                 state.laps, (total // env.track_length).astype(jnp.int32)
             )
+            # a step the car crashed on, or any after, isn't racing
+            racing = ~env_state.collisions
+            speed = jnp.where(racing, env_state.cartesian_states[:, 3], 0.0)
             state = RaceState(
                 env_state=env_state,
                 obs=observe(env_state),
@@ -348,15 +360,20 @@ class F1TenthRace:
                 + passes(
                     state.start + state.rewards,
                     state.start + total,
-                    ~env_state.collisions,
+                    racing,
                 ),
+                racing_steps=state.racing_steps + racing,
+                speed_sum=state.speed_sum + speed,
+                top_speed=jnp.maximum(state.top_speed, speed),
             )
             return state, rewards, env_state.collisions.all()
 
         def stats(state: RaceState) -> dict:
             """Each car's average lap time in seconds over the laps it completed
-            (NaN without one), how many times it passed a car still racing, and
-            whether it crashed: of a race, or a batch of races."""
+            (NaN without one), how many times it passed a car still racing,
+            whether it crashed, and its average and top speed while it was still
+            racing (NaN if it never was): of a race, or a batch of races."""
+            raced = state.racing_steps > 0
             return dict(
                 lap_time=jnp.where(
                     state.laps > 0,
@@ -365,6 +382,12 @@ class F1TenthRace:
                 ),
                 passes=state.passes.astype(jnp.float32),
                 crashes=state.env_state.collisions.astype(jnp.float32),
+                avg_speed=jnp.where(
+                    raced,
+                    state.speed_sum / jnp.maximum(state.racing_steps, 1),
+                    jnp.nan,
+                ),
+                top_speed=jnp.where(raced, state.top_speed, jnp.nan),
             )
 
         # one race, unbatched
