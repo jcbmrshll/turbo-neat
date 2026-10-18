@@ -1240,10 +1240,18 @@ function speciesColor(id) {
   return SERIES[((id % SERIES.length) + SERIES.length) % SERIES.length];
 }
 
-// "big-red-dog", with the species part set apart
+// "sandy-trout-4", with the species part (the animal in the middle) set apart
 function nameEl(name) {
-  const cut = name.lastIndexOf("-");
-  return h("span", { class: "gname" }, name.slice(0, cut), h("span", { class: "sp", text: name.slice(cut) }));
+  const from = name.indexOf("-");
+  const to = name.lastIndexOf("-");
+  if (from === to) return h("span", { class: "gname", text: name });
+  return h(
+    "span",
+    { class: "gname" },
+    name.slice(0, from),
+    h("span", { class: "sp", text: name.slice(from, to) }),
+    name.slice(to),
+  );
 }
 
 function swatch(species) {

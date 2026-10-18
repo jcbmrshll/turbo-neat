@@ -1,32 +1,34 @@
-"""Memorable names for the members of a population: two adjectives for the individual
-and an animal for its species, e.g. genome 1234 of species 3 is "big-red-dog".
+"""Memorable names for the members of a population: an adjective and a number for the
+individual and an animal for its species, e.g. genome 1234 of species 3 is
+"sandy-trout-4".
 
 Names are a function of the ids alone, so they're the same wherever they're shown,
-and in every run: rerunning a seed names everyone the same. The first
-len(ADJECTIVES) * (len(ADJECTIVES) - 1) individuals of a run all get different
-adjective pairs.
+and in every run: rerunning a seed names everyone the same. The adjective and number
+together pick out the genome, so no two members of a run share a name; the number
+counts up by one every len(ADJECTIVES) genomes, so it stays short (4 digits for a
+million genomes).
 """
 
 ADJECTIVES = """
-agile airy amber ample amused ancient arctic ashen astral atomic autumn azure balmy
-bashful beefy big blazing blithe blond blue bold bony bouncy brainy brash brave
-breezy bright brisk broad bronze brown bubbly bumpy burly busy calm carmine cheeky
-cheery chilly chirpy chubby clean clear clever cloudy clumsy coastal cobalt cocky
-cold comfy cool copper coral cosmic cozy crafty crimson crisp crusty cuddly curly
-cyan dainty damp dandy dapper daring dark dashing deep deft dewy dim dizzy dotty
-drowsy dry dusky dusty eager earthy easy electric elfin exotic faded fair fancy fast
-feisty fiery fizzy flaky fleet floral fluffy flying foggy fond fresh frisky frosty
-funky fuzzy gentle giant giddy gilded glad gleaming glossy golden grand gray green
-groovy grumpy gusty hairy hale handy happy hardy hasty hazel hazy hearty heavy
+agile airy amber ample amused arctic ashen astral atomic autumn azure balmy beefy
+big blithe blond blue bold bony bouncy brainy brash brave breezy bright brisk broad
+bronze brown bubbly bumpy burly busy calm cheeky cheery chilly chirpy chubby clean
+clear clever cloudy clumsy cobalt cocky cold comfy cool copper coral cosmic cozy
+crafty crisp crusty cuddly curly cyan dainty damp dandy dapper daring dark deep deft
+dewy dim dizzy dotty drowsy dry dusky dusty eager earthy easy elfin exotic faded
+fair fancy fast feisty fiery fizzy flaky fleet floral fluffy flying foggy fond fresh
+frisky frosty funky fuzzy gentle giant giddy gilded glad glossy golden grand gray
+green groovy grumpy gusty hairy hale handy happy hardy hasty hazel hazy hearty heavy
 hidden hollow humble hungry icy idle indigo inky iron ivory jade jaunty jazzy jolly
 jumbo jumpy keen kind lanky large lavish lazy leafy lean lemon lilac limber little
 lively lofty loud lucky lunar lush magic mellow merry mighty mild minty misty moody
 mossy muddy murky musty narrow neat nimble noble noisy nutty oaken odd olive orange
-ornate pale peppy perky petite pink plucky plump polar proud quick quiet quirky
-rapid rare rosy rough round royal ruby rusty sandy scarlet shaggy shiny short shy
-silent silky silver sleek sleepy slim sly smoky smooth snappy snowy spry stout sunny
-swift tame tangy tawny teal tidy tiny tough tranquil true tubby twinkly upbeat urban
-vast velvet vivid wacky wary wavy wild windy wise witty woolly young zany zesty
+ornate pale peppy perky petite pink plucky plump polar posh proud quick quiet quirky
+rapid rare ripe rosy rough round royal ruby rusty salty sandy shaggy sharp shiny
+short shy silent silky silver sleek sleepy slim sly smoky smooth snappy snowy snug
+spiky spry stony stout sunny sweet swift tall tame tangy tawny teal tidy tiny tough
+true tubby upbeat urban vast velvet vivid wacky warm wary wavy wild windy wiry wise
+witty woolly young zany zesty zippy
 """.split()
 
 ANIMALS = """
@@ -52,21 +54,9 @@ tarsier termite tern tiger toad tortoise toucan trout tuna turkey turtle viper
 vulture wallaby walrus warthog wasp weasel whale wolf wombat woodpecker yak zebra
 """.split()
 
-# primes, so coprime to the number of names they shuffle and id -> name is one-to-one
-_ADJECTIVE_STEP = 48271
+# coprime to the number of names they shuffle, so id -> name is one-to-one
+_ADJECTIVE_STEP = 157
 _ANIMAL_STEP = 73
-
-
-def individual_alias(genome_id: int) -> str:
-    """Two different adjectives, e.g. "big-red"."""
-    n = len(ADJECTIVES)
-    pairs = n * (n - 1)
-    # spread out, so neighbouring ids don't share a first adjective
-    k = (genome_id * _ADJECTIVE_STEP) % pairs
-    first, second = divmod(k, n - 1)
-    # skip over the first adjective, so the pair never repeats a word
-    second += second >= first
-    return f"{ADJECTIVES[first]}-{ADJECTIVES[second]}"
 
 
 def species_alias(species_id: int) -> str:
@@ -78,5 +68,9 @@ def species_alias(species_id: int) -> str:
 
 
 def alias(genome_id: int, species_id: int) -> str:
-    """The full name, e.g. "big-red-dog"."""
-    return f"{individual_alias(genome_id)}-{species_alias(species_id)}"
+    """The full name, the animal of its species in the middle, e.g. "sandy-trout-4"."""
+    n = len(ADJECTIVES)
+    number, k = divmod(genome_id, n)
+    # spread out, so neighbouring ids get different adjectives
+    adjective = ADJECTIVES[(k * _ADJECTIVE_STEP) % n]
+    return f"{adjective}-{species_alias(species_id)}-{number}"

@@ -602,7 +602,14 @@ class RunStore:
         return self._read_jsonl(self._dir(run_id) / "metrics.jsonl", since)
 
     def media(self, run_id: str, since: int = 0) -> Dict[str, Any]:
-        return self._read_jsonl(self._dir(run_id) / "media.jsonl", since)
+        media = self._read_jsonl(self._dir(run_id) / "media.jsonl", since)
+        # named again, as names are everywhere else, so runs logged before a change
+        # of names show the new ones
+        for row in media["rows"]:
+            for p in row.get("players") or []:
+                if p.get("birth_species") is not None:
+                    p["name"] = alias(p["id"], p["birth_species"])
+        return media
 
     def media_path(self, run_id: str, file: str) -> Path:
         path = self._dir(run_id) / "media" / _safe(file)
