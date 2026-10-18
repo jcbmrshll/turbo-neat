@@ -66,7 +66,11 @@ const KERB_RED = "rgb(215, 30, 35)", KERB_WHITE = "rgb(245, 245, 245)";
 const START_AHEAD = 1.5, START_SQUARES = 8;
 const CHEQUER = ["rgb(25, 25, 25)", "rgb(245, 245, 245)"];
 // the strip along the bottom with each car's speed and steering, in pixels
-const HUD_H = 76, HUD_FONT = 9;
+const HUD_H = 84, HUD_FONT = 9;
+// two rows on each card for its lap times, under the speed bar, in a smaller face
+const LAP_ROW = 20, LAP_FONT = `8px ui-monospace, "SF Mono", Menlo, monospace`;
+// the fastest lap of the race so far, in purple as on the broadcasts (--s4)
+const FASTEST = "#5b3fb0";
 const FONT = `${HUD_FONT}px ui-monospace, "SF Mono", Menlo, monospace`;
 // the steering wheel turns this many degrees either way at full lock
 const WHEEL_LOCK = 135;
@@ -78,7 +82,8 @@ const BRAKE_ON = [255, 40, 40], BRAKE_OFF = [110, 25, 25], LAMP_OFF = [205, 190,
 const EASE = 1 - Math.sqrt(0.8);
 // races are recorded at 20 frames a second (examples/f1tenth.py), and played at
 // twice that, so a lap goes by at a watchable pace
-const FPS = 40;
+const RECORD_HZ = 20;
+const FPS = 2 * RECORD_HZ;
 // offscreen pictures are drawn at the canvas's own pixels, up to this many, and no
 // larger than this, so a big track doesn't take hundreds of megabytes
 const MAX_RES = 3, MAX_PIXELS = 16e6;
@@ -375,8 +380,9 @@ function startIndex(center, [fx, fy]) {
   return (nearest + roundHalfEven(START_AHEAD / spacing)) % center.length;
 }
 
-// the car furthest round the lap at each step, among those still running
-function leaders(center, pose, crashed, steps, cars) {
+// how far each car has come along the lap at each step, (steps, cars), in
+// centerline points from where it started
+function lapProgress(center, pose, steps, cars) {
   const n = center.length;
   const laps = new Float64Array(steps * cars);
   for (let i = 0; i < cars; i++) {
@@ -397,9 +403,16 @@ function leaders(center, pose, crashed, steps, cars) {
         unwrap += wrapped - dd;
       }
       last = nearest;
-      laps[t * cars + i] = crashed(t, i) ? -Infinity : nearest + unwrap;
+      laps[t * cars + i] = nearest + unwrap;
     }
   }
+  return laps;
+}
+
+// the car furthest round the lap at each step, among those still running
+function leaders(center, pose, crashed, steps, cars) {
+  const progress = lapProgress(center, pose, steps, cars);
+  const laps = progress.map((v, k) => (crashed(Math.floor(k / cars), k % cars) ? -Infinity : v));
   const out = new Int32Array(steps);
   for (let t = 0; t < steps; t++) {
     let all = true;
@@ -411,6 +424,74 @@ function leaders(center, pose, crashed, steps, cars) {
     if (t && all) out[t] = out[t - 1];
   }
   return out;
+}
+
+// frames a card takes to slide to its new place when cars pass
+const SLIDE_FRAMES = 10;
+
+// Each car's place in the race at each step, (steps, cars), 0 for the leader: by
+// how far round the lap it is, from the start line (not by distance covered: the
+// grid is spread out behind the line), a car that's out where it stopped, so it
+// keeps its place until someone passes the spot; level cars in grid order. And
+// slide, where
+// each one's card is in the strip, in places: its place averaged over the last
+// SLIDE_FRAMES steps, so cards slide past each other rather than jump, the same
+// at any step whatever was played before it.
+function raceOrder(center, pose, crashed, start, steps, cars) {
+  const n = center.length;
+  const far = lapProgress(center, pose, steps, cars);
+  // from the start line: where each car began, a little behind it or ahead
+  for (let i = 0; i < cars; i++) {
+    const [x, y] = pose(0, i);
+    let nearest = 0, best = Infinity;
+    center.forEach(([cx, cy], k) => {
+      const d = (cx - x) ** 2 + (cy - y) ** 2;
+      if (d < best) [nearest, best] = [k, d];
+    });
+    const behind = ((((nearest - start + n / 2) % n) + n) % n) - n / 2;
+    const offset = behind - far[i];
+    for (let t = 0; t < steps; t++) far[t * cars + i] += offset;
+  }
+  const place = new Int32Array(steps * cars);
+  const seats = [...Array(cars).keys()];
+  for (let t = 0; t < steps; t++) {
+    const order = [...seats].sort((a, b) => far[t * cars + b] - far[t * cars + a] || a - b);
+    order.forEach((i, k) => (place[t * cars + i] = k));
+  }
+  const slide = new Float32Array(steps * cars);
+  for (let t = 0; t < steps; t++) {
+    const from = Math.max(0, t - SLIDE_FRAMES + 1);
+    for (let i = 0; i < cars; i++) {
+      let sum = 0;
+      for (let u = from; u <= t; u++) sum += place[u * cars + i];
+      slide[t * cars + i] = sum / (t - from + 1);
+    }
+  }
+  return { place, slide, far };
+}
+
+// When each car crossed the start/finish line, in steps (fractions of one,
+// between the two it crossed between), from far (raceOrder's, in centerline
+// points from the line, n a lap): the first time it's k laps round, for k = 0,
+// 1, 2, ... while it's running. Its clock starts at the first, as it leaves the
+// grid behind the line, so lap k is from crossing k - 1 to crossing k.
+function lapCrossings(far, n, crashed, steps, cars) {
+  return Array.from({ length: cars }, (_, i) => {
+    // a car that starts on or past the line is on its first lap already
+    const done = far[i] >= 0 ? [0] : [];
+    for (let t = 1; t < steps && !crashed(t, i); t++) {
+      const a = far[(t - 1) * cars + i], b = far[t * cars + i];
+      const line = done.length * n;
+      if (a < line && b >= line) done.push(t - 1 + (line - a) / (b - a));
+    }
+    return done;
+  });
+}
+
+// a lap time as the timing screens show it, minutes:seconds.hundredths, 00:32.45
+function lapTime(steps) {
+  const s = steps / RECORD_HZ, m = Math.floor(s / 60);
+  return `${String(m).padStart(2, "0")}:${(s - 60 * m).toFixed(2).padStart(5, "0")}`;
 }
 
 // ---------------------------------------------------------------- the strip
@@ -558,6 +639,10 @@ export function f1tenth(arrays) {
   const hudTop = H - HUD_H, cell = W / cars, pad = 4, r = 11;
   const barY = hudTop + pad + 2 * r + 4;
   const roomy = cell >= 90;
+  const { place, slide, far } = raceOrder(center, pose, isCrashed, start, steps, cars);
+  const crossings = lapCrossings(far, center.length, isCrashed, steps, cars);
+  // every lap anyone finished, [when, how long], to tell the fastest so far
+  const allLaps = crossings.flatMap((done) => done.slice(1).map((c, k) => [c, c - done[k]]));
 
   // the pictures drawn once, at res pixels to a logical one, redrawn larger if the
   // canvas outgrows them
@@ -568,7 +653,7 @@ export function f1tenth(arrays) {
     track = trackImage(walls, center, trackLo, trackHi, scale, roundHalfEven(0.12 * scale * 2) / 2, res, start);
     lapMap = trackImage(walls, center, mapLo, mapHi, mapScale, 1, res);
     plates = liveries.map(([name], i) =>
-      [false, true].map((faded) => plate(name, [i * cell + 1, barY + 9, (i + 1) * cell - 1, H], res, faded)),
+      [false, true].map((faded) => plate(name, [i * cell + 1, barY + 9 + LAP_ROW, (i + 1) * cell - 1, H], res, faded)),
     );
   }
   build(2);
@@ -620,14 +705,18 @@ export function f1tenth(arrays) {
     ctx.font = FONT;
     ctx.textBaseline = "top";
     for (let i = 0; i < cars; i++) {
+      // each car's card where it's sliding to, in race order: drawn at its seat's
+      // place (where its plate was drawn) and moved there
+      ctx.save();
+      ctx.translate((slide[t * cars + i] - i) * cell, 0);
       const x0 = i * cell + pad, x1 = (i + 1) * cell - pad;
       const out = isCrashed(t, i), v = speed.data[t * cars + i], brake = braking[t * cars + i];
       const body = liveries[i][1];
       // the wheel, turned as far as the front wheels are, to full lock
       const turn = Math.min(Math.max(steer.data[t * cars + i] / maxSteer, -1), 1) * WHEEL_LOCK;
       wheel(ctx, x0 + r, hudTop + pad + r, r, turn, css(body), out);
-      // the seat, and the car's reward so far where there's room
-      let label = `P${i + 1}`;
+      // its place in the race, and its reward so far where there's room
+      let label = `P${place[t * cars + i] + 1}`;
       if (rewards && roomy) label += ` · ${rewards.data[t * cars + i].toFixed(0)} m`;
       ctx.fillStyle = out ? DIM : INK;
       ctx.textAlign = "left";
@@ -660,9 +749,28 @@ export function f1tenth(arrays) {
         ctx.fillStyle = css(BRAKE_ON);
         ctx.fillRect(x0, barY + 6, brake * (x1 - x0), 2);
       }
+      // its lap times, once it's crossed the line: the one it's on, running, and
+      // under it the last it finished, in purple if it's the fastest of the race
+      // so far
+      const done = crossings[i].filter((c) => c <= t);
+      const lapY = barY + 10;
+      ctx.font = LAP_FONT;
+      ctx.textAlign = "left";
+      if (!out && done.length) {
+        ctx.fillStyle = INK;
+        ctx.fillText(`${roomy ? `L${done.length} ` : ""}${lapTime(t - done.at(-1))}`, x0, lapY);
+      }
+      if (done.length > 1) {
+        const last = done.at(-1) - done.at(-2);
+        const fastest = Math.min(...allLaps.filter(([when]) => when <= t).map(([, took]) => took));
+        ctx.fillStyle = last === fastest ? FASTEST : DIM;
+        ctx.fillText(`${roomy ? "last " : ""}${lapTime(last)}`, x0, lapY + 9);
+      }
+      ctx.font = FONT;
       // the team's plate, filling the rest of the card, a pixel from the next
       const p = plates[i][+out];
       ctx.drawImage(p.image, p.left, p.top, p.width, p.height);
+      ctx.restore();
     }
   }
 
@@ -671,6 +779,11 @@ export function f1tenth(arrays) {
     height: H,
     frames: steps,
     fps: FPS,
+    // where each car's card is in the strip at step t, in places from the left
+    // (fractions while it slides), for the page to put anything of its own under
+    // them
+    cars,
+    slots: (t) => Array.from({ length: cars }, (_, i) => slide[t * cars + i]),
     draw(ctx, t, { seat = null } = {}) {
       seat = lastSeat = pick(seat);
       // the offscreen pictures at the canvas's pixels, so they stay sharp
@@ -745,7 +858,16 @@ export function f1tenth(arrays) {
       if (x >= mapX && x <= mapX + lapMap.width && y >= mapY && y <= mapY + lapMap.height) {
         return nearest((i) => onMap(t, i), 6);
       }
-      if (speed && y >= hudTop) return Math.min(cars - 1, Math.floor(x / cell));
+      if (speed && y >= hudTop) {
+        // the card there now, wherever its car started
+        const at = x / cell - 0.5;
+        let best = null, bestD = 0.5;
+        for (let i = 0; i < cars; i++) {
+          const d = Math.abs(slide[t * cars + i] - at);
+          if (d < bestD) [best, bestD] = [i, d];
+        }
+        return best;
+      }
       const at = corner(t, lastSeat);
       return nearest((i) => onScreen(t, i, at), reach + 6);
     },
