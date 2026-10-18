@@ -1,6 +1,6 @@
 // the colours episodes are drawn in, for renderers.js, f1tenth.js and descent.js
 
-// the dashboard's palette: its CSS tokens (style.css)
+// the dashboard's palette: its CSS tokens (dashboard.css)
 export const PANEL = "#f5e8cf"; // --panel
 export const WELL = "#faf2de"; // --well
 export const EDGE = "#cdb188"; // --edge

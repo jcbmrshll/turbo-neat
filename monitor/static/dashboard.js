@@ -607,6 +607,8 @@ export function mountDashboard(root, options) {
   const layout = h("div", { class: "nd-layout" }, main, boardEl);
   root.replaceChildren(layout);
   root.classList.add("neat-dash");
+  // dashboard.css lays it out filling root, or in the page
+  root.classList.toggle("nd-fill", fill);
 
   const view = {
     head: header && h("div", { class: "runhead" }),
