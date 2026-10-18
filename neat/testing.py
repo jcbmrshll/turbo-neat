@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
+from neat.fitness import describe_stats
 from neat.genome import Genome
 
 # called with keyword arguments (rng, genome, activation_selector) for a single
@@ -68,18 +69,22 @@ def top_k_test(
 def field_test(
     rng: jax.Array,
     genome: Genome,
-    test_fn: Callable[..., Tuple[jax.Array, Any]],
+    test_fn: Callable[..., Tuple[jax.Array, Any, Dict[str, jax.Array]]],
     size: int,
-    name: str,
+    name: Optional[str],
     **kwargs,
 ) -> TestResult:
     """Tests the size fittest genomes against each other, fittest in the first seat,
-    logging the best and the mean of their scores as max_<name> and mean_<name>,
-    with the test's episode."""
+    logging the best and the mean of their scores as max_<name> and mean_<name>
+    (not with no name), and the mean, least and most of each of the test's stats
+    (see neat.fitness.describe_stats), with the test's episode."""
     field = fittest(genome, size)
-    scores, episode = test_fn(rng=rng, genome=field, **kwargs)
+    scores, episode, stats = test_fn(rng=rng, genome=field, **kwargs)
+    metrics = describe_stats(stats)
+    if name is not None:
+        metrics.update({f"max_{name}": scores.max(), f"mean_{name}": scores.mean()})
     return TestResult(
-        metrics={f"max_{name}": scores.max(), f"mean_{name}": scores.mean()},
+        metrics=metrics,
         episode=episode,
         players=field.genome_id,
     )
@@ -95,10 +100,13 @@ def make_top_k_test(
 
 
 def make_field_test(
-    test_fn: Callable[..., Tuple[jax.Array, Any]], size: int, name: str = "field"
+    test_fn: Callable[..., Tuple[jax.Array, Any, Dict[str, jax.Array]]],
+    size: int,
+    name: Optional[str] = "field",
 ) -> PopulationTestFn:
     """A population test from a game between a batch of genomes, returning each
-    one's score and an episode (see neat.fitness.make_mp_field_fn): the size
-    fittest play it (see field_test)."""
+    one's score, an episode and each one's stats (see
+    neat.fitness.make_mp_field_fn): the size fittest play it (see field_test).
+    With name None, it logs no scores, just the stats."""
     assert size > 0, "a field test needs at least one genome"
     return partial(field_test, test_fn=test_fn, size=size, name=name)

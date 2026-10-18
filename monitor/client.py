@@ -15,6 +15,7 @@ failure is reported once.
 
 import io
 import json
+import math
 import sys
 import urllib.error
 import urllib.request
@@ -256,14 +257,17 @@ class Monitor:
         print(f"monitor: {self.url}/run/{self.run_id}")
 
     def log(self, step: int, data: Dict[str, Any]) -> None:
-        """Log scalars and media for one step. Values that are neither are dropped."""
+        """Log scalars and media for one step. Values that are neither are dropped,
+        as are NaN and infinite scalars (a lap time when no car lapped), which JSON
+        can't carry."""
         if self.run_id is None:
             return
         metrics = {}
         for key, value in data.items():
             number = to_number(value)
             if number is not None:
-                metrics[key] = number
+                if math.isfinite(number):
+                    metrics[key] = number
                 continue
             if isinstance(value, Members):
                 self._post_json(
