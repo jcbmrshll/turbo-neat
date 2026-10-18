@@ -7,6 +7,7 @@
 // from the union of every ancestor's graph, laid out once.
 
 import { NdArray, traceNetwork } from "./episodes.js";
+import { WIDE_INPUTS, inputGroups } from "./groups.js";
 import { ACCENT, BLUE, DIM, EDGE, FAINT, INK, MID, ORANGE, PANEL, PICKED, WELL } from "./palette.js";
 
 // frames between one ancestor and the next, a second's worth of frames, and how
@@ -170,11 +171,16 @@ export function descentView(data, width, { lim = null } = {}) {
   const fields = lim != null ? boundaries(data, lim) : null;
   const font = `10px ${MONO()}`;
   const labelW = (labels) => Math.min(160, Math.max(0, ...labels.map((s) => s.length)) * 6.2 + 12);
+  // many inputs (F1TENTH's 62) go close together, labelled by group: lidar,
+  // car 0, ...; inputs of their own singly
+  const wide = numIn > WIDE_INPUTS;
+  const groups = wide ? inputGroups([...Array(numIn).keys()], (n) => inLabels[n]) : null;
+  const groupLabels = groups?.flatMap((g) => (g.name != null && g.members.length > 1 ? [g.name] : g.members.map((n) => inLabels[n])));
   const side = fields ? BOUNDARY : 0;
-  const netH = Math.max(side, 220, rows * ROW + 16);
+  const netH = Math.max(side, 220, rows * (wide ? 7 : ROW) + 16);
   const W = Math.max(width, side + 260);
   const H = netH + 12 + STRIP;
-  const x0 = (side ? side + 24 : 0) + labelW(inLabels), x1 = W - labelW(outLabels);
+  const x0 = (side ? side + 24 : 0) + labelW(groupLabels ?? inLabels), x1 = W - labelW(outLabels);
   const y0 = 10, y1 = netH - 10;
   const xy = (n) => {
     const [cx, cy] = place.get(n);
@@ -292,20 +298,50 @@ export function descentView(data, width, { lim = null } = {}) {
       const io = n < numIO;
       ctx.globalAlpha = alpha;
       ctx.beginPath();
-      ctx.arc(x, y, io ? 5 : 4.5, 0, 2 * Math.PI);
+      ctx.arc(x, y, wide && n < numIn ? 2.6 : io ? 5 : 4.5, 0, 2 * Math.PI);
       ctx.fillStyle = n < numIn ? INK : io ? ACCENT : WELL;
       ctx.strokeStyle = io ? PANEL : INK;
       ctx.lineWidth = io ? 2 : 1.25;
       ctx.fill();
       ctx.stroke();
-      if (io) {
+      if (io && !(wide && n < numIn)) {
         ctx.fillStyle = MID;
         ctx.textAlign = n < numIn ? "right" : "left";
         ctx.fillText(n < numIn ? inLabels[n] : outLabels[n - numIn], x + (n < numIn ? -9 : 9), y + 3.5);
       }
     });
     ctx.globalAlpha = 1;
+    if (groups) drawGroups(ctx);
     drawStrip(ctx, a, b, t);
+  }
+
+  // the inputs' labels when they're close together: a group's name beside its
+  // span, with a bracket, and an input of its own's name smaller
+  function drawGroups(ctx) {
+    ctx.textAlign = "right";
+    for (const g of groups) {
+      if (g.name != null && g.members.length > 1) {
+        const [x, ya] = xy(g.members[0]), [, yb] = xy(g.members.at(-1));
+        ctx.font = font;
+        ctx.fillStyle = INK;
+        ctx.fillText(g.name, x - 9, (ya + yb) / 2 + 3.5);
+        ctx.strokeStyle = EDGE;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x - 3, ya - 2);
+        ctx.lineTo(x - 6, ya - 2);
+        ctx.lineTo(x - 6, yb + 2);
+        ctx.lineTo(x - 3, yb + 2);
+        ctx.stroke();
+      } else {
+        ctx.font = `8px ${MONO()}`;
+        ctx.fillStyle = MID;
+        for (const n of g.members) {
+          const [x, y] = xy(n);
+          ctx.fillText(inLabels[n], x - 7, y + 3);
+        }
+      }
+    }
   }
 
   return {

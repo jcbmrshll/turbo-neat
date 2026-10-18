@@ -341,6 +341,11 @@ code {
 .act-key i { width: 22px; height: 8px; border: 1px solid var(--edge-soft); }
 .act-key i:first-of-type { background: linear-gradient(90deg, var(--s2), var(--well)); }
 .act-key i:last-of-type { background: linear-gradient(90deg, var(--well), var(--s1)); }
+/* big networks (groups.js WIDE_INPUTS): inputs close together in their groups,
+   each with a bracketed label, and inputs of their own labelled small */
+.net .lab.small { font-size: 9px; }
+.net .lab.group { fill: var(--fg); }
+.net .bracket { fill: none; stroke: var(--edge); stroke-width: 1; }
 
 /* episodes, drawn in the browser */
 .player { width: 100%; display: flex; flex-direction: column; gap: 6px; }
@@ -350,6 +355,11 @@ code {
 .player-controls .play { min-width: 34px; }
 /* a test's episode and the network playing it, side by side when there's room */
 .ep-grid { width: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 10px; align-items: start; }
+/* a big network goes compact in a column beside a larger episode, which loses
+   the player's cap on its height */
+:is(.ep-grid, .lineage-grid).wide { grid-template-columns: minmax(0, 1fr) 280px; }
+.lineage-grid > .wide-net { order: 1; }
+:is(.ep-grid, .lineage-grid).wide .player canvas { max-width: none !important; }
 
 /* tabs */
 
