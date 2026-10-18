@@ -859,7 +859,12 @@ async function showEpisode(card, entry) {
   }
   if (card.shown !== entry.episode) return;
   const rows = obsRows(arrays, entry.players || []).filter((r) => r.id != null);
-  const player = episodePlayer(render(arrays), { seat: rows[0]?.seat ?? null });
+  // a race between the epoch's fittest is seen from a car picked at random (the
+  // leader's is just one view of it); anything else from its first agent
+  const start = FIELD_RACES.has(entry.env) ? rows[Math.floor(Math.random() * rows.length)] : rows[0];
+  const view = render(arrays);
+  const player = listen(episodePlayer(view, { seat: start?.seat ?? null }));
+  carNames(view, player, entry.players || [], { at: { step: entry.step } });
   if (!rows.length) {
     card.body.replaceChildren(player.el);
     return;
@@ -878,7 +883,90 @@ async function showEpisode(card, entry) {
     return true;
   };
   player.onSeat = pick;
-  requestAnimationFrame(() => pick(rows[0].seat));
+  requestAnimationFrame(() => pick(start.seat));
+}
+
+// a player, with what each frame drawn goes to: the network lit up beside it
+// (player.netFrame) and the names under a race's cars (player.namesFrame)
+function listen(player) {
+  player.onFrame = (frame) => {
+    player.netFrame?.(frame);
+    player.namesFrame?.(frame);
+  };
+  return player;
+}
+
+// a member's species, from the name it was born with ("big-red-dog": the dog)
+// when the record doesn't say (members' episodes don't)
+function birthSpecies(p) {
+  if (p.birth_species != null) return p.birth_species;
+  const animal = p.name?.slice(p.name.lastIndexOf("-") + 1);
+  const found = Object.entries(state.speciesNames).find(([, name]) => name === animal);
+  return found ? Number(found[0]) : null;
+}
+
+// In a race whose view can say where each car's card is in its strip (f1tenth.js
+// slots), each car's member named under its card, in its species' colour,
+// following it as the cards shuffle: the followed car's in bold, and a link to
+// the member's tab (opened `at` an epoch and game) but for `self`, the member
+// whose tab it is, in bold. Returns whether it named them.
+function carNames(view, player, players, { self = null, at = null } = {}) {
+  if (!view.slots || players.length !== view.cars) return false;
+  const chips = players.map((p) => {
+    const species = birthSpecies(p);
+    // "big-red-dog" on one line, in type sized to fill its card (fit, below)
+    const name = p.name || `#${p.id}`;
+    const who = h("span", { class: "who", text: name, style: species != null ? `color:${speciesColor(species)}` : null });
+    const title = `${name}${p.reward != null ? ` · ${p.reward.toFixed(1)} m` : ""}`;
+    if (p.id === self) return h("span", { class: "car-name self", title }, who);
+    return h(
+      "a",
+      {
+        class: "car-name",
+        href: `/run/${state.runId}/genome/${p.id}`,
+        title,
+        onclick: (e) => {
+          if (e.metaKey || e.ctrlKey) return;
+          e.preventDefault();
+          openTab(p.id, { name: p.name, at });
+        },
+      },
+      who,
+    );
+  });
+  for (const chip of chips) chip.style.width = `${100 / view.cars}%`;
+  const row = h("div", { class: "car-names" }, chips);
+  // as wide as the race above it, however wide that's drawn, each name in type
+  // that fills its card's width, worked out again when the race's width changes
+  const canvas = player.el.querySelector("canvas");
+  const measure = document.createElement("canvas").getContext("2d");
+  let fitted = 0;
+  const fit = () => {
+    if (!canvas.clientWidth || canvas.clientWidth === fitted) return;
+    fitted = canvas.clientWidth;
+    row.style.width = `${fitted}px`;
+    // the card, less the chip's padding
+    const room = fitted / view.cars - 4;
+    for (const chip of chips) {
+      const who = chip.querySelector(".who");
+      // in bold, so the followed car's name fits too
+      measure.font = `700 100px ${getComputedStyle(who).fontFamily}`;
+      const perPx = measure.measureText(who.textContent).width / 100;
+      who.style.fontSize = `${Math.min(12, room / perPx).toFixed(2)}px`;
+    }
+  };
+  const place = (t) => {
+    fit();
+    view.slots(t).forEach((slot, seat) => {
+      chips[seat].style.left = `${(slot / view.cars) * 100}%`;
+      chips[seat].classList.toggle("followed", seat === player.seat);
+    });
+  };
+  // on the page before it's first placed, so the names' type can be measured
+  player.el.insertBefore(row, player.el.querySelector(".player-controls"));
+  player.namesFrame = place;
+  place(player.frame);
+  return true;
 }
 
 // a genome's network in an epoch, kept once fetched; null if it wasn't logged
@@ -924,11 +1012,8 @@ function playerLine(key, entry) {
   if (!MEDIA_ORDER.includes(key)) return [];
   const players = entry.players || [];
   if (key === "episode" && FIELD_RACES.has(entry.env)) {
-    // the field on the grid, fittest first, each linking to the member
-    if (players.length) {
-      const who = (p) => (p.name ? genomeLink(p.id, p.name, { step: entry.step }) : `#${p.id}`);
-      return [matchup(players.map((p, seat) => seatPlayer(who(p), seat, entry.env, p.reward)))];
-    }
+    // the field's members are named under their cars in the strip (carNames)
+    if (players.length) return [];
     const text = "the epoch's fittest racing each other, P1 the fittest";
     return [h("div", { class: "ep-games" }, h("span", { class: "ep-player" }, h("span", { class: "dim", text })))];
   }
@@ -1038,7 +1123,7 @@ function layoutAcross(net, width, withValues) {
 // car 0, ...) with one label each, and inputs of their own labelled singly;
 // outputs down the right with their labels (and values, when lit up); hidden
 // nodes in columns between by depth, each level with its sources. All in
-// `height`, the height of the episode beside it.
+// `height`, the height of the episode beside it, where that leaves room.
 function layoutGrouped(net, width, height, withValues) {
   const { nodes, hidden, outDepth, columns } = layers(net);
   const inputs = (columns[0] || []).sort((a, b) => a.id - b.id);
@@ -1046,7 +1131,9 @@ function layoutGrouped(net, width, height, withValues) {
   const groups = inputGroups(inputs, (n) => n.label).map((g) => ({ name: g.name, nodes: g.members }));
   const label = (g) => (g.name != null && g.nodes.length > 1 ? g.name : null);
   const longest = Math.max(...groups.flatMap((g) => (label(g) ? [label(g)] : g.nodes.map((n) => n.label || ""))).map((t) => t.length));
-  const H = Math.max(height, 240), PADY = 10;
+  // as tall as the episode, but never so short that the inputs labelled singly
+  // are less than 6px apart and their labels run into each other
+  const PADY = 10, H = Math.max(height, 240, 2 * PADY + 6 * (inputs.length + 0.8 * (groups.length - 1)));
   const padL = Math.min(110, longest * 5.6 + 14);
   const padR = Math.min(120, (Math.max(...outputs.map((n) => (n.label || "").length)) + (withValues ? 6 : 0)) * 6.2 + 14);
   const W = Math.max(width, padL + padR + 60);
@@ -1837,7 +1924,7 @@ function drawNetwork(card, net, activity = null) {
   const legend = show && h("span", { class: "act-key" }, "−", h("i"), "activation", h("i"), "+");
   card.foot.replaceChildren(h("div", { class: "net-foot" }, h("span", { text: summary }), legend, trace?.error && h("span", { class: "dim", text: trace.error })));
   if (activity) {
-    activity.player.onFrame = show || null;
+    activity.player.netFrame = show || null;
     show?.(activity.player.frame);
   }
 }
@@ -1913,12 +2000,12 @@ async function loadEpisodes(tab, card) {
       eps.env,
       p.reward,
     );
-  const players = ep.players.length > 1 && matchup(ep.players.map(player));
-  card.foot.replaceChildren(...[players].filter(Boolean));
   // a new player only when the episode changes, so one that's playing carries on
   const src = `/api/runs/${state.runId}/member_episodes/${eps.step}/${ep.index}`;
   if (card.shown === src) return;
   card.shown = src;
+  const players = ep.players.length > 1 && matchup(ep.players.map(player));
+  card.foot.replaceChildren(...[players].filter(Boolean));
   card.player = null;
   card.body.replaceChildren(h("div", { class: "loading", text: "loading…" }));
   const render = RENDERERS[eps.env];
@@ -1935,7 +2022,8 @@ async function loadEpisodes(tab, card) {
   card.rows = obsRows(arrays, ep.players);
   // the member's own agent, the first of them if it plays several (a flock)
   const own = card.rows.find((r) => r.id === tab.id);
-  card.player = episodePlayer(render(arrays), { seat: own ? own.seat : ep.seat });
+  const view = render(arrays);
+  card.player = listen(episodePlayer(view, { seat: own ? own.seat : ep.seat }));
   card.player.onSeat = (seat) => {
     const row = card.rows.find((r) => r.seat === seat);
     if (row?.id === tab.id) {
@@ -1948,6 +2036,9 @@ async function loadEpisodes(tab, card) {
     return row?.id != null;
   };
   card.body.replaceChildren(card.player.el);
+  // a race's members are named under their cars; anything else says who played
+  // which seat below
+  if (carNames(view, card.player, ep.players, { self: tab.id, at: { step: eps.step, game: ep.index } })) card.foot.replaceChildren();
   linkMember(tab);
 }
 

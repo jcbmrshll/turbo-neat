@@ -36,7 +36,7 @@
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
   --serif: Spectral, Georgia, serif;
   --side: 240px;
-  --board: 460px;
+  --board: 400px;
 }
 
 * { box-sizing: border-box; }
@@ -360,6 +360,22 @@ code {
 :is(.ep-grid, .lineage-grid).wide { grid-template-columns: minmax(0, 1fr) 280px; }
 .lineage-grid > .wide-net { order: 1; }
 :is(.ep-grid, .lineage-grid).wide .player canvas { max-width: none !important; }
+/* a race's members, under their cars' cards in the strip, moving with them */
+.car-names { position: relative; align-self: center; height: 16px; margin-top: -3px; }
+.car-name {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+  font: 10px/1 var(--mono);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+}
+a.car-name:hover { text-decoration: underline; text-underline-offset: 2px; }
+.car-name.followed .who, .car-name.self .who { font-weight: 700; }
 
 /* tabs */
 
