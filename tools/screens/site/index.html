@@ -6,8 +6,9 @@
   RunExplorer mounts it, on the run of ?env= in the site's export (/neat-data).
   tools/screens/shots.py shoots it to compare with the site itself.
 
-  ?impl=fork mounts the site's own dashboard (served at /fork/), to check this page
-  draws it exactly as the site does.
+  It mounts this checkout's dashboard (monitor/static, served at /static/) with the
+  site's options (preset.js). ?impl=fork mounts the site's own dashboard instead
+  (served at /fork/), to check this page draws it exactly as the site does.
 -->
 <html lang="en">
   <head>
@@ -98,6 +99,12 @@
       if (impl === "fork") {
         const { mountDashboard } = await import("/fork/dashboard.js");
         mountDashboard(host, base);
+      } else {
+        // the shared dashboard, from this checkout's monitor/static
+        const { mountDashboard } = await import("/static/dashboard.js");
+        const { staticSource } = await import("/static/sources.js");
+        const { SITE } = await import("./preset.js");
+        mountDashboard(host, { source: staticSource(base), ...SITE });
       }
     </script>
   </body>
