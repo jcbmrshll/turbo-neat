@@ -131,6 +131,7 @@ class F1TenthRace:
         timestep_ratio: int = 1,
         max_speed: float = 20.0,
         grid_spacing: float = GRID_SPACING,
+        crash_penalty: float = 0.0,
     ):
         self.num_players = num_cars
         self.max_speed = max_speed
@@ -337,8 +338,11 @@ class F1TenthRace:
             # the car that crashes this step keeps the progress it made up to the
             # crash, and the env freezes it in place from the next
             env_state = settle(env_state)
-            rewards = progress(env_state)
-            total = state.rewards + rewards
+            distance = progress(env_state)
+            total = state.rewards + distance
+            # the reward is the distance, less crash_penalty on the step a car crashes
+            crashed = env_state.collisions & ~state.env_state.collisions
+            rewards = distance - crash_penalty * crashed
             steps = state.steps + 1
             # driving back over the line and on again doesn't count a lap twice
             laps = jnp.maximum(
@@ -513,7 +517,11 @@ class RaceAgainstBots:
 
 
 def make_config(
-    input_size: int, output_size: int, num_cars: int, population_size: int = 1000
+    input_size: int,
+    output_size: int,
+    num_cars: int,
+    population_size: int = 1000,
+    speciation_threshold: float = 2.0,
 ) -> NEATConfig:
     mutation_config = MutationConfig(
         add_connection_prob=0.05,
@@ -557,7 +565,7 @@ def make_config(
     selection_config = SelectionConfig(
         population_size=population_size,
         cutoff_pct=0.1,
-        speciation_threshold=2.0,
+        speciation_threshold=speciation_threshold,
         compatibility_coefficients=(1.0, 0.5),
         elitism=0.1,
         stagnation_fn=make_remove_last_if_stagnant_and_full_stagnation_fn(
@@ -702,6 +710,18 @@ def main():
         help="metres between places on the starting grid",
     )
     parser.add_argument(
+        "--crash-penalty",
+        type=float,
+        default=0.0,
+        help="metres taken off a car's score when it crashes",
+    )
+    parser.add_argument(
+        "--speciation-threshold",
+        type=float,
+        default=2.0,
+        help="genome distance beyond which a genome starts a new species",
+    )
+    parser.add_argument(
         "--monitor",
         nargs="?",
         const=DEFAULT_URL,
@@ -716,6 +736,7 @@ def main():
         map_name=args.map,
         max_speed=args.max_speed,
         grid_spacing=args.grid_spacing,
+        crash_penalty=args.crash_penalty,
     )
     race_steps = round(args.race_seconds / race.dt)
     # a race is done when every car is out, but it doesn't start over: the wrecks
@@ -749,7 +770,13 @@ def main():
         )
 
     neat = NEAT(
-        config=make_config(race.obs_size, race.act_size, args.cars, args.population),
+        config=make_config(
+            race.obs_size,
+            race.act_size,
+            args.cars,
+            args.population,
+            args.speciation_threshold,
+        ),
         # the first round's races are recorded for the monitor's lineage view
         fitness_fn=make_mp_fitness_fn(
             race,
