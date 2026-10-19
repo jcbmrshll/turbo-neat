@@ -141,6 +141,7 @@ class F1TenthRace:
         grid_spacing: float = GRID_SPACING,
         crash_penalty: float = 0.0,
         grid_spacing_jitter: float = 0.0,
+        cars_per_row: int = 1,
         accel_noise: float = 0.0,
         reward: str = "distance",
     ):
@@ -303,20 +304,24 @@ class F1TenthRace:
             ).reshape(num_cars, -1)
             return jnp.concatenate((scan, own, others), axis=1)
 
+        num_rows = -(-num_cars // cars_per_row)
+
         def reset_fn(key: jax.Array) -> RaceState:
             next_key, key = jax.random.split(key)
             gap_key, noise_key = jax.random.split(jax.random.fold_in(key, 1))
             _, env_state = env.reset(key)
             # the env lines the cars up nose to tail; start from a staggered grid
-            # instead, from the place on the track it picked at random, each gap
-            # grid_spacing_jitter either side of grid_spacing
+            # instead, from the place on the track it picked at random: rows of
+            # cars_per_row side by side, each gap between rows grid_spacing_jitter
+            # either side of grid_spacing
             places = jnp.arange(num_cars)
             gaps = (
                 grid_spacing
-                + jax.random.uniform(gap_key, (num_cars - 1,), minval=-1.0, maxval=1.0)
+                + jax.random.uniform(gap_key, (num_rows - 1,), minval=-1.0, maxval=1.0)
                 * grid_spacing_jitter
             )
-            behind = jnp.concatenate((jnp.zeros(1), jnp.cumsum(gaps)))
+            rows_behind = jnp.concatenate((jnp.zeros(1), jnp.cumsum(gaps)))
+            behind = rows_behind[places // cars_per_row]
             frenet = jnp.column_stack(
                 (
                     env_state.frenet_states[0, 0] - behind,
@@ -781,6 +786,14 @@ def main():
         help="metres between places on the starting grid",
     )
     parser.add_argument(
+        "--cars-per-row",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="cars side by side in each row of the starting grid: 1 for single "
+        "file, 2 for pairs as on an F1 grid; rows are --grid-spacing apart",
+    )
+    parser.add_argument(
         "--grid-spacing-jitter",
         type=float,
         default=0.0,
@@ -852,6 +865,7 @@ def main():
         crash_penalty=args.crash_penalty,
         reward=args.reward,
         grid_spacing_jitter=args.grid_spacing_jitter,
+        cars_per_row=args.cars_per_row,
         accel_noise=args.accel_noise,
     )
     race_steps = round(args.race_seconds / race.dt)
@@ -871,6 +885,7 @@ def main():
             map_name=args.map,
             max_speed=args.max_speed,
             grid_spacing=args.test_grid_spacing or args.grid_spacing,
+            cars_per_row=args.cars_per_row,
         )
     if args.test == "bots":
         test_fn = make_top_k_test(
