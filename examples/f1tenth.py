@@ -53,7 +53,7 @@ from neat.fitness import (
     make_test_fn,
 )
 from neat.neat import NEAT
-from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
+from neat.species import make_relative_fitness_stagnation_fn
 from neat.testing import make_field_test, make_top_k_test
 
 # The env's own lidar and wall check are too slow for a population: its lidar ray
@@ -638,9 +638,9 @@ def make_config(
         speciation_threshold=speciation_threshold,
         compatibility_coefficients=(1.0, 0.5),
         elitism=0.1,
-        stagnation_fn=make_remove_last_if_stagnant_and_full_stagnation_fn(
-            max_stagnated_steps=20, full_target=5
-        ),
+        # self-play scores are relative, so a species' fitness can stop rising while
+        # it still improves: only remove stagnant species that are also below the mean
+        stagnation_fn=make_relative_fitness_stagnation_fn(minimum_stagnation=20),
         maximum_species=5,
         selection_tournament_size=5,
         fitness_ema_period=5,
