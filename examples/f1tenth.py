@@ -152,6 +152,7 @@ class F1TenthRace:
         accel_noise: float = 0.0,
         reward: str = "distance",
         crashed_last: bool = False,
+        distance_weight: float = 0.0,
     ):
         assert reward in ("distance", "placement"), f"no reward {reward!r}"
         self.num_players = num_cars
@@ -422,7 +423,12 @@ class F1TenthRace:
                 # every car out of the race places behind every car still in it
                 position = jnp.where(env_state.collisions, position - 1e6, position)
             place = place_score(position)
-            progress_reward = distance if reward == "distance" else place - state.place
+            # placement can add distance_weight per metre, a little for not stopping
+            progress_reward = (
+                distance
+                if reward == "distance"
+                else place - state.place + distance_weight * distance
+            )
             crashed = env_state.collisions & ~state.env_state.collisions
             rewards = progress_reward - crash_penalty * crashed
             steps = state.steps + 1
@@ -850,6 +856,14 @@ def main():
         "the finish (1 for first down to 0 for last)",
     )
     parser.add_argument(
+        "--distance-bonus",
+        type=float,
+        default=0.0,
+        help="with --reward placement, also this for covering --max-speed x "
+        "--race-seconds, and as much less for less (0.1 is half a place's "
+        "worth at the most, with 6 cars), so the leader has a reason not to stop",
+    )
+    parser.add_argument(
         "--crashed-last",
         action="store_true",
         help="with --reward placement, every car that crashed places behind every "
@@ -900,6 +914,7 @@ def main():
         crash_penalty=args.crash_penalty,
         reward=args.reward,
         crashed_last=args.crashed_last,
+        distance_weight=args.distance_bonus / (args.max_speed * args.race_seconds),
         grid_spacing_jitter=args.grid_spacing_jitter,
         cars_per_row=args.cars_per_row,
         accel_noise=args.accel_noise,
