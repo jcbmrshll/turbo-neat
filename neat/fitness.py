@@ -366,9 +366,15 @@ def fitness_mp(
     record_fn: Optional[Callable] = None,
     parallel_rounds: int = 1,
     stats_fn: Optional[Callable] = None,
+    balance_seats: bool = False,
     **kwargs,
 ):
-    """Each round shuffles the population into games of num_players. When the
+    """Each round shuffles the population into games of num_players. With
+    balance_seats, the population is split at random into num_players classes, a
+    game takes one genome of each class at random, and class c plays from seat
+    (c + round) % num_players, so that over num_players rounds (or any multiple)
+    every genome plays from every seat equally often: in races, every genome's
+    mean starting place is the same. When the
     population doesn't divide evenly, the last game is filled with genomes that
     also play elsewhere, so fitness is the mean reward per game played (see play
     for max_resets). Also returns Scores with each genome's mean reward in each
@@ -381,12 +387,12 @@ def fitness_mp(
     num_games = -(-genome.batch_size // num_players)
     num_seats = num_games * num_players
 
-    def one_round(rng, record=False):
-        """The genomes in each seat, their rewards, and the games if record."""
-        rng_seats, rng_fill, rng_game = jax.random.split(rng, 3)
-        ids = jnp.concatenate(
+    def shuffled(rng_order, rng_fill):
+        """Every genome once, in a random order, then genomes to fill the seats
+        left, each a genome that also plays elsewhere."""
+        return jnp.concatenate(
             [
-                jax.random.permutation(rng_seats, genome.batch_size),
+                jax.random.permutation(rng_order, genome.batch_size),
                 jax.random.choice(
                     rng_fill,
                     genome.batch_size,
@@ -395,6 +401,26 @@ def fitness_mp(
                 ),
             ]
         )
+
+    if balance_seats:
+        # the classes, a row each
+        rng_classes, rng = jax.random.split(rng)
+        classes = shuffled(*jax.random.split(rng_classes)).reshape(
+            num_players, num_games
+        )
+
+    def one_round(rng, round_index, record=False):
+        """The genomes in each seat, their rewards, and the games if record."""
+        rng_seats, rng_fill, rng_game = jax.random.split(rng, 3)
+        if balance_seats:
+            rows = jax.vmap(jax.random.permutation)(
+                jax.random.split(rng_seats, num_players), classes
+            )
+            # seat s of game g takes game g's genome of the class at seat s
+            seats = (jnp.arange(num_players) - round_index) % num_players
+            ids = rows[seats[None], jnp.arange(num_games)[:, None]].ravel()
+        else:
+            ids = shuffled(rng_seats, rng_fill)
         seated = jax.tree.map(lambda x: x[ids], genome)
         rewards, frames, stats = play_seated(
             step_fn,
@@ -431,36 +457,40 @@ def fitness_mp(
     def add(carry, tallies):
         return jax.tree.map(jnp.add, carry, tallies)
 
-    def some_rounds(carry, rngs):
+    def some_rounds(carry, rounds):
         """carry plus some rounds' tallies, and each round's returns."""
-        ids, rewards, _, stats = jax.vmap(one_round)(rngs)
+        ids, rewards, _, stats = jax.vmap(one_round)(*rounds)
         tallies = jax.vmap(tally)(ids, rewards, stats)
         carry = add(carry, jax.tree.map(lambda x: x.sum(axis=0), tallies))
         return carry, tallies[0] / tallies[1]
 
-    rngs = jax.random.split(rng, num_rounds)
+    rngs, round_indices = jax.random.split(rng, num_rounds), jnp.arange(num_rounds)
     # the stats stats_fn finds, by name, to tally them from the start
-    stat_names = jax.eval_shape(lambda r: one_round(r)[3], rngs[0]).keys()
+    stat_names = jax.eval_shape(lambda r: one_round(r, 0)[3], rngs[0]).keys()
     no_stats = {k: zeros for k in stat_names}
     carry = (zeros, zeros, no_stats, no_stats)
     returns, recording = [], None
     if record:
         # one round's games are enough to show: every genome plays in one of them
-        ids, rewards, frames, stats = one_round(rngs[0], record=True)
+        ids, rewards, frames, stats = one_round(rngs[0], 0, record=True)
         tallies = tally(ids, rewards, stats)
         carry = add(carry, tallies)
         returns.append((tallies[0] / tallies[1])[None])
         recording = Recording(frames, ids.reshape(num_games, num_players))
-        rngs = rngs[1:]
+        rngs, round_indices = rngs[1:], round_indices[1:]
     # the rest in batches of parallel_rounds, then any left over
     batch = max(1, min(parallel_rounds, len(rngs)))
     batches = len(rngs) // batch
     if batches:
-        stacked = rngs[: batches * batch].reshape((batches, batch) + rngs.shape[1:])
+        stacked = jax.tree.map(
+            lambda x: x[: batches * batch].reshape((batches, batch) + x.shape[1:]),
+            (rngs, round_indices),
+        )
         carry, batched = jax.lax.scan(some_rounds, carry, xs=stacked)
         returns.append(batched.reshape(-1, genome.batch_size))
     if len(rngs) % batch:
-        carry, rest = some_rounds(carry, rngs[batches * batch :])
+        rest = (rngs[batches * batch :], round_indices[batches * batch :])
+        carry, rest = some_rounds(carry, rest)
         returns.append(rest)
     totals, counts, stat_totals, stat_counts = carry
     stats = None
@@ -576,6 +606,7 @@ def make_mp_fitness_fn(
     record_fn: Optional[Callable] = None,
     parallel_rounds: int = 1,
     stats_fn: Optional[Callable] = None,
+    balance_seats: bool = False,
 ) -> Callable:
     assert num_rounds > 0, "num_rounds must be greater than 0"
     assert steps_per_round > 0, "steps_per_round must be greater than 0"
@@ -594,6 +625,7 @@ def make_mp_fitness_fn(
         record_fn=record_fn,
         parallel_rounds=parallel_rounds,
         stats_fn=stats_fn,
+        balance_seats=balance_seats,
     )
 
 

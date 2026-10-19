@@ -110,6 +110,8 @@ class RaceState:
     car_crashes: jax.Array
     # each car's acceleration error this step, in m/s^2
     accel_noise: jax.Array
+    # each car's score for its place in the race so far, 1 leading to 0 last
+    place: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -140,7 +142,9 @@ class F1TenthRace:
         crash_penalty: float = 0.0,
         grid_spacing_jitter: float = 0.0,
         accel_noise: float = 0.0,
+        reward: str = "distance",
     ):
+        assert reward in ("distance", "placement"), f"no reward {reward!r}"
         self.num_players = num_cars
         self.max_speed = max_speed
         self.env = env = make(
@@ -344,12 +348,19 @@ class F1TenthRace:
                 top_speed=jnp.zeros(num_cars),
                 car_crashes=jnp.zeros(num_cars, bool),
                 accel_noise=accel_noise * jax.random.normal(noise_key, (num_cars,)),
+                place=jnp.zeros(num_cars),
             )
 
         # the acceleration noise drifts (an Ornstein-Uhlenbeck process), keeping a
         # standard deviation of accel_noise
         noise_decay = np.exp(-self.dt / ACCEL_NOISE_TIME)
         noise_kick = accel_noise * np.sqrt(1 - noise_decay**2)
+
+        def place_score(position):
+            """Each car's score for its place, by how far round the track it is from
+            the grid: 1 for the leader down to 0 for the last car."""
+            place = jnp.argsort(jnp.argsort(-position))
+            return (num_cars - 1 - place) / max(num_cars - 1, 1)
 
         def step_fn(state: RaceState, actions: jax.Array):
             next_key, key = jax.random.split(state.key)
@@ -383,9 +394,13 @@ class F1TenthRace:
             env_state, hit_car = settle(env_state)
             distance = progress(env_state)
             total = state.rewards + distance
-            # the reward is the distance, less crash_penalty on the step a car crashes
+            # the reward is the distance, or with reward "placement", the change in
+            # the car's place score, so that a race's rewards add up to the score of
+            # the place it finishes in; less crash_penalty on the step a car crashes
+            place = place_score(state.start + total)
+            progress_reward = distance if reward == "distance" else place - state.place
             crashed = env_state.collisions & ~state.env_state.collisions
-            rewards = distance - crash_penalty * crashed
+            rewards = progress_reward - crash_penalty * crashed
             steps = state.steps + 1
             # driving back over the line and on again doesn't count a lap twice
             laps = jnp.maximum(
@@ -414,6 +429,7 @@ class F1TenthRace:
                 top_speed=jnp.maximum(state.top_speed, speed),
                 car_crashes=state.car_crashes | (crashed & hit_car),
                 accel_noise=noise,
+                place=place,
             )
             return state, rewards, env_state.collisions.all()
 
@@ -786,6 +802,19 @@ def main():
         "--grid-spacing",
     )
     parser.add_argument(
+        "--reward",
+        choices=("distance", "placement"),
+        default="distance",
+        help="what a car scores in a race: the distance it covers, or its place at "
+        "the finish (1 for first down to 0 for last)",
+    )
+    parser.add_argument(
+        "--balance-grid",
+        action="store_true",
+        help="start every genome from every place on the grid equally often over "
+        "its races (exactly so when --rounds is a multiple of --cars)",
+    )
+    parser.add_argument(
         "--crash-penalty",
         type=float,
         default=0.0,
@@ -821,6 +850,7 @@ def main():
         max_speed=args.max_speed,
         grid_spacing=args.grid_spacing,
         crash_penalty=args.crash_penalty,
+        reward=args.reward,
         grid_spacing_jitter=args.grid_spacing_jitter,
         accel_noise=args.accel_noise,
     )
@@ -890,6 +920,7 @@ def main():
             parallel_rounds=args.parallel_rounds,
             # lap time, passes, crashes and speeds, from every race
             stats_fn=race.stats,
+            balance_seats=args.balance_grid,
         ),
         test_fn=test_fn,
         test_every=args.test_every,
