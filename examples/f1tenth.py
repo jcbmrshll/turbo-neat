@@ -650,6 +650,7 @@ def make_config(
         init_mode="partial",
     )
 
+    maximum_species = 5
     selection_config = SelectionConfig(
         population_size=population_size,
         cutoff_pct=0.1,
@@ -657,9 +658,12 @@ def make_config(
         compatibility_coefficients=(1.0, 0.5),
         elitism=0.1,
         # self-play scores are relative, so a species' fitness can stop rising while
-        # it still improves: only remove stagnant species that are also below the mean
-        stagnation_fn=make_relative_fitness_stagnation_fn(minimum_stagnation=20),
-        maximum_species=5,
+        # it still improves: only remove stagnant species that are also below the
+        # mean, and only once there are as many species as there can be
+        stagnation_fn=make_relative_fitness_stagnation_fn(
+            minimum_stagnation=20, full_target=maximum_species
+        ),
+        maximum_species=maximum_species,
         selection_tournament_size=5,
         fitness_ema_period=5,
     )

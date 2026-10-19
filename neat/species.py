@@ -362,15 +362,21 @@ def make_improvement_stagnation_fn(max_stagnated_steps: int) -> StagnationFn:
     return stagnated
 
 
-def make_relative_fitness_stagnation_fn(minimum_stagnation: int) -> StagnationFn:
+def make_relative_fitness_stagnation_fn(
+    minimum_stagnation: int, full_target: Optional[int] = None
+) -> StagnationFn:
     """Removes every species that hasn't set a new best in minimum_stagnation
-    generations and whose fitness is below the mean of all species'."""
+    generations and whose fitness is below the mean of all species', and with
+    full_target, only once there are at least full_target species."""
 
     def stagnated(species_data: SpeciesData) -> jax.Array:
         fitness_mean = jnp.mean(species_data.ema_fitness, where=species_data.mask)
-        return (species_data.stagnation >= minimum_stagnation) & (
+        stagnant = (species_data.stagnation >= minimum_stagnation) & (
             species_data.ema_fitness < fitness_mean
         )
+        if full_target is None:
+            return stagnant
+        return stagnant & (species_data.next_idx >= full_target)
 
     return stagnated
 
