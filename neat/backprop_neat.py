@@ -1,6 +1,6 @@
 from dataclasses import replace
 from functools import partial
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -60,7 +60,7 @@ def evaluate_and_train(
     max_grad_norm: Optional[float],
     activation_selector: ActivationSelector,
     eval_batches: int,
-) -> Tuple[Population, Optional[Recording], jax.Array]:
+) -> Tuple[Population, Optional[Recording], jax.Array, Dict[str, jax.Array]]:
     """Train the weights and biases of every genome by gradient descent, then score
     the trained genomes on eval_batches fresh batches: fitness is their mean.
 
@@ -96,7 +96,8 @@ def evaluate_and_train(
     returns = jnp.where(jnp.isfinite(returns), returns, DIVERGED_FITNESS)
     recording = scored[0][2] if len(scored[0]) > 2 else None
     genome = replace(genome, fitness=returns.mean(axis=0))
-    return replace(population, batched_genome=genome), recording, returns
+    # backprop's fitness functions give no stats of their episodes
+    return replace(population, batched_genome=genome), recording, returns, {}
 
 
 class BackpropNEAT(NEAT):

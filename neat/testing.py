@@ -73,10 +73,12 @@ def field_test(
     size: int,
     name: Optional[str],
     ranks: Optional[Tuple[int, ...]] = None,
+    shuffle: bool = False,
     **kwargs,
 ) -> TestResult:
     """Tests the size fittest genomes against each other, fittest in the first seat,
-    or with ranks, the genomes at those ranks by fitness (1 the fittest), logging the best and the mean of their scores as max_<name> and mean_<name>
+    or with ranks, the genomes at those ranks by fitness (1 the fittest), or with
+    shuffle, the same genomes seated in a random order, logging the best and the mean of their scores as max_<name> and mean_<name>
     (not with no name), and the mean, least and most of each of the test's stats
     (see neat.fitness.describe_stats), with the test's episode."""
     if ranks is None:
@@ -84,6 +86,10 @@ def field_test(
     else:
         top = fittest(genome, max(ranks))
         field = jax.tree.map(lambda x: x[jnp.array(ranks) - 1], top)
+    if shuffle:
+        rng, shuffle_rng = jax.random.split(rng)
+        order = jax.random.permutation(shuffle_rng, size)
+        field = jax.tree.map(lambda x: x[order], field)
     scores, episode, stats = test_fn(rng=rng, genome=field, **kwargs)
     metrics = describe_stats(stats)
     if name is not None:
@@ -109,15 +115,19 @@ def make_field_test(
     size: int,
     name: Optional[str] = "field",
     ranks: Optional[Sequence[int]] = None,
+    shuffle: bool = False,
 ) -> PopulationTestFn:
     """A population test from a game between a batch of genomes, returning each
     one's score, an episode and each one's stats (see
     neat.fitness.make_mp_field_fn): the size fittest play it, or the size genomes
-    at ranks by fitness, 1 being the fittest, for a field of mixed strength (see
+    at ranks by fitness, 1 being the fittest, for a field of mixed strength, and
+    with shuffle, seated in a random order rather than fittest first (see
     field_test). With name None, it logs no scores, just the stats."""
     assert size > 0, "a field test needs at least one genome"
     if ranks is not None:
         ranks = tuple(ranks)
         assert len(ranks) == size, "a field test needs a rank for every genome"
         assert len(set(ranks)) == size and min(ranks) >= 1, "ranks are distinct, from 1"
-    return partial(field_test, test_fn=test_fn, size=size, name=name, ranks=ranks)
+    return partial(
+        field_test, test_fn=test_fn, size=size, name=name, ranks=ranks, shuffle=shuffle
+    )

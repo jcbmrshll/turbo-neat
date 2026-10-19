@@ -703,7 +703,7 @@ def main():
     parser.add_argument("--cars", type=int, default=6, help="cars in each race")
     parser.add_argument("--map", default="Spielberg", help="an F1TENTH track")
     parser.add_argument(
-        "--race-seconds", type=float, default=20.0, help="length of a race"
+        "--race-seconds", type=float, default=60.0, help="length of a race"
     )
     parser.add_argument(
         "--test-seconds",
@@ -713,7 +713,7 @@ def main():
         "--race-seconds",
     )
     parser.add_argument(
-        "--rounds", type=int, default=20, help="races each genome runs per generation"
+        "--rounds", type=int, default=7, help="races each genome runs per generation"
     )
     parser.add_argument(
         "--parallel-rounds",
@@ -861,12 +861,13 @@ def main():
                 max_resets=max_resets,
                 record_every=race.record_every,
                 record_fn=race.record_frame,
-                stats_fn=test_race.stats,
             ),
             size=args.cars,
-            # just their stats: distance is what fitness already logs
+            # just the race for the monitor: the stats come from training's races
             name=None,
             ranks=args.field_ranks,
+            # from a grid in no order of fitness, so the fast can catch the slow
+            shuffle=True,
         )
 
     neat = NEAT(
@@ -887,6 +888,8 @@ def main():
             record_every=race.record_every,
             record_fn=race.record_frame,
             parallel_rounds=args.parallel_rounds,
+            # lap time, passes, crashes and speeds, from every race
+            stats_fn=race.stats,
         ),
         test_fn=test_fn,
         test_every=args.test_every,
