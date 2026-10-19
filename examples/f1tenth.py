@@ -144,6 +144,7 @@ class F1TenthRace:
         cars_per_row: int = 1,
         accel_noise: float = 0.0,
         reward: str = "distance",
+        crashed_last: bool = False,
     ):
         assert reward in ("distance", "placement"), f"no reward {reward!r}"
         self.num_players = num_cars
@@ -402,7 +403,11 @@ class F1TenthRace:
             # the reward is the distance, or with reward "placement", the change in
             # the car's place score, so that a race's rewards add up to the score of
             # the place it finishes in; less crash_penalty on the step a car crashes
-            place = place_score(state.start + total)
+            position = state.start + total
+            if crashed_last:
+                # every car out of the race places behind every car still in it
+                position = jnp.where(env_state.collisions, position - 1e6, position)
+            place = place_score(position)
             progress_reward = distance if reward == "distance" else place - state.place
             crashed = env_state.collisions & ~state.env_state.collisions
             rewards = progress_reward - crash_penalty * crashed
@@ -824,6 +829,12 @@ def main():
         "the finish (1 for first down to 0 for last)",
     )
     parser.add_argument(
+        "--crashed-last",
+        action="store_true",
+        help="with --reward placement, every car that crashed places behind every "
+        "car still racing (the crashed ones by how far they got)",
+    )
+    parser.add_argument(
         "--balance-grid",
         action="store_true",
         help="start every genome from every place on the grid equally often over "
@@ -833,7 +844,8 @@ def main():
         "--crash-penalty",
         type=float,
         default=0.0,
-        help="metres taken off a car's score when it crashes",
+        help="taken off a car's score when it crashes: metres with --reward "
+        "distance; with --reward placement, 1 / (cars - 1) is one place",
     )
     parser.add_argument(
         "--speciation-threshold",
@@ -866,6 +878,7 @@ def main():
         grid_spacing=args.grid_spacing,
         crash_penalty=args.crash_penalty,
         reward=args.reward,
+        crashed_last=args.crashed_last,
         grid_spacing_jitter=args.grid_spacing_jitter,
         cars_per_row=args.cars_per_row,
         accel_noise=args.accel_noise,
