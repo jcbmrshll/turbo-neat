@@ -28,6 +28,9 @@
 //   memberHref(id)   the address of a member's tab, for its links
 //   chartWindow      the epochs the charts show to begin with (null: all)
 //   onChartWindow(n) the reader picked another
+//   chartRange       charts of a quantity's max, mean and min show all three to
+//                    begin with, not just the mean (true)
+//   onChartRange(on) the reader showed or hid the max and min
 //   boardOpen        the population panel open to begin with, not folded to a
 //                    strip at the side (false)
 //   onBoardOpen(on)  the reader opened or folded it
@@ -564,6 +567,7 @@ export function mountDashboard(root, options) {
     onTab = null,
     onTabs = null,
     onChartWindow = null,
+    onChartRange = null,
     onBoardOpen = null,
     onRefresh = null,
     onError = null,
@@ -599,6 +603,8 @@ export function mountDashboard(root, options) {
     overviewScroll: 0,
     // the metric charts show the last this-many epochs, or all of them if null
     chartWindow: options.chartWindow || null,
+    // and of a quantity's max, mean and min, all three, or just the mean
+    chartRange: options.chartRange ?? true,
   };
   const networkCache = {};
   // whether the run's networks are drawn compact, in a column beside a larger
@@ -868,6 +874,13 @@ export function mountDashboard(root, options) {
     view.charts.replaceChildren(...groups.map((g) => chartCard(g, from)), ...media);
   }
 
+  function setChartRange(on) {
+    state.chartRange = on;
+    onChartRange?.(on);
+    renderChartsTitle();
+    if (state.rows.length) renderCharts();
+  }
+
   function setChartWindow(n) {
     state.chartWindow = n > 0 ? Math.floor(n) : null;
     onChartWindow?.(state.chartWindow);
@@ -904,6 +917,16 @@ export function mountDashboard(root, options) {
       h(
         "span",
         { class: "scrub" },
+        h("button", {
+          class: state.chartRange ? "on" : null,
+          text: "min/max",
+          title: "show each quantity's max and min beside its mean, or just the mean",
+          onclick: () => setChartRange(!state.chartRange),
+        }),
+      ),
+      h(
+        "span",
+        { class: "scrub" },
         h("span", { class: "dim", text: "last" }),
         toggle(null, "all", `every ${w.step}`),
         presets.map((n) => toggle(n, fmt(n), `the last ${n} ${w.steps}`)),
@@ -914,7 +937,10 @@ export function mountDashboard(root, options) {
   }
 
   function chartCard(group, from) {
-    const series = group.series.map((s, i) => {
+    // a quantity's max and min, hidden: just its mean, in the colour it has beside them
+    const ranged = group.series.some((s) => s.name === "mean");
+    const shown = (s) => state.chartRange || !ranged || (s.name !== "max" && s.name !== "min");
+    const series = group.series.map((s, i) => [s, i]).filter(([s]) => shown(s)).map(([s, i]) => {
       // species_*/s<id> series are named and coloured after their species
       const species = group.name.startsWith("species_") && s.name.match(/^s(\d+)$/);
       return {
