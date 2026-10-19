@@ -153,6 +153,8 @@ class F1TenthRace:
         reward: str = "distance",
         crashed_last: bool = False,
         distance_weight: float = 0.0,
+        lidar_cars: bool = False,
+        lidar_rays: int = 1,
     ):
         assert reward in ("distance", "placement"), f"no reward {reward!r}"
         self.num_players = num_cars
@@ -187,16 +189,63 @@ class F1TenthRace:
             return jnp.where(on_map, distance_transform[row, col], 0.0)
 
         beam_angles = jnp.linspace(-LIDAR_FOV / 2, LIDAR_FOV / 2, num_beams)
+        # each beam reads what its own ray hits; with lidar_cars and lidar_rays > 1, it
+        # also sweeps its sector (the angle between beams) with that many more rays,
+        # and reads the nearest car any of them hits before a wall, if nearer, so
+        # that a car can't hide between two beams (walls still read along the beam)
+        sector = LIDAR_FOV / max(num_beams - 1, 1)
+        sweep = lidar_rays if lidar_cars and lidar_rays > 1 else 0
+        ray_offsets = jnp.concatenate(
+            (jnp.zeros(1), ((jnp.arange(sweep) + 0.5) / max(sweep, 1) - 0.5) * sector)
+        )
+        ray_angles = (beam_angles[:, None] + ray_offsets[None, :]).ravel()
+        half_size = jnp.array([params.length / 2, params.width / 2])
+
+        def car_distance(points, poses):
+            """Each car's rays' points' distance to the nearest other car's body,
+            (cars, rays): to the rectangle around its pose, 0 inside it."""
+            offset = points[:, :, None, :] - poses[None, None, :, :2]
+            cos, sin = jnp.cos(poses[:, 2]), jnp.sin(poses[:, 2])
+            local = jnp.stack(
+                (
+                    offset[..., 0] * cos + offset[..., 1] * sin,
+                    -offset[..., 0] * sin + offset[..., 1] * cos,
+                ),
+                axis=-1,
+            )
+            outside = jnp.abs(local) - half_size
+            distance = jnp.linalg.norm(
+                jnp.maximum(outside, 0.0), axis=-1
+            ) + jnp.minimum(outside.max(axis=-1), 0.0)
+            # not its own body, which every ray starts inside
+            own = jnp.eye(num_cars, dtype=bool)[:, None, :]
+            return jnp.where(own, jnp.inf, jnp.maximum(distance, 0.0)).min(axis=-1)
 
         def lidar(poses):
-            angles = poses[:, 2:3] + beam_angles
+            angles = poses[:, 2:3] + ray_angles
             directions = jnp.stack((jnp.cos(angles), jnp.sin(angles)), axis=-1)
 
+            def ends(ranges):
+                return poses[:, None, :2] + ranges[..., None] * directions
+
             def march(_, ranges):
-                hits = poses[:, None, :2] + ranges[..., None] * directions
-                return ranges + wall_distance(hits)
+                hits = ends(ranges)
+                step = wall_distance(hits)
+                if lidar_cars:
+                    step = jnp.minimum(step, car_distance(hits, poses))
+                return ranges + step
 
             ranges = jax.lax.fori_loop(0, lidar_steps, march, jnp.zeros(angles.shape))
+            ranges = ranges.reshape(num_cars, num_beams, 1 + sweep)
+            if sweep:
+                # the sweep's rays that stopped at a car, not a wall
+                hits = ends(ranges.reshape(num_cars, -1))
+                at_car = car_distance(hits, poses) < wall_distance(hits)
+                at_car = at_car.reshape(ranges.shape)[..., 1:]
+                swept = jnp.where(at_car, ranges[..., 1:], jnp.inf).min(axis=-1)
+                ranges = jnp.minimum(ranges[..., 0], swept)
+            else:
+                ranges = ranges[..., 0]
             return jnp.minimum(ranges, sensing) / sensing
 
         def vertices(poses):
@@ -870,6 +919,19 @@ def main():
         "worth at the most, with 6 cars), so the leader has a reason not to stop",
     )
     parser.add_argument(
+        "--lidar-cars",
+        action="store_true",
+        help="the lidar sees the other cars (and wrecks) as well as the walls",
+    )
+    parser.add_argument(
+        "--lidar-rays",
+        type=int,
+        default=1,
+        help="with --lidar-cars, rays each lidar beam also sweeps its sector with, "
+        "reading the nearest car any of them hits, so that a car can't hide between "
+        "beams (walls still read along the beam)",
+    )
+    parser.add_argument(
         "--crashed-last",
         action="store_true",
         help="with --reward placement, every car that crashed places behind every "
@@ -921,6 +983,8 @@ def main():
         reward=args.reward,
         crashed_last=args.crashed_last,
         distance_weight=args.distance_bonus / (args.max_speed * args.race_seconds),
+        lidar_cars=args.lidar_cars,
+        lidar_rays=args.lidar_rays,
         grid_spacing_jitter=args.grid_spacing_jitter,
         cars_per_row=args.cars_per_row,
         accel_noise=args.accel_noise,
@@ -943,6 +1007,8 @@ def main():
             max_speed=args.max_speed,
             grid_spacing=args.test_grid_spacing or args.grid_spacing,
             cars_per_row=args.cars_per_row,
+            lidar_cars=args.lidar_cars,
+            lidar_rays=args.lidar_rays,
         )
     if args.test == "bots":
         test_fn = make_top_k_test(
