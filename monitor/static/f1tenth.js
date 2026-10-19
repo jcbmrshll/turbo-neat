@@ -466,12 +466,14 @@ const SLIDE_FRAMES = 10;
 // Each car's place in the race at each step, (steps, cars), 0 for the leader: by
 // how far round the lap it is, from the start line (not by distance covered: the
 // grid is spread out behind the line), a car that's out where it stopped, so it
-// keeps its place until someone passes the spot; level cars in grid order. And
+// keeps its place until someone passes the spot, or with crashedLast, behind every
+// car still running, the cars that are out in the order they stopped; level cars
+// in grid order. And
 // slide, where
 // each one's card is in the strip, in places: its place averaged over the last
 // SLIDE_FRAMES steps, so cards slide past each other rather than jump, the same
 // at any step whatever was played before it.
-function raceOrder(center, pose, crashed, start, steps, cars) {
+function raceOrder(center, pose, crashed, start, steps, cars, crashedLast = false) {
   const n = center.length;
   const far = lapProgress(center, pose, steps, cars);
   // from the start line: where each car began, a little behind it or ahead
@@ -489,7 +491,10 @@ function raceOrder(center, pose, crashed, start, steps, cars) {
   const place = new Int32Array(steps * cars);
   const seats = [...Array(cars).keys()];
   for (let t = 0; t < steps; t++) {
-    const order = [...seats].sort((a, b) => far[t * cars + b] - far[t * cars + a] || a - b);
+    const out = (i) => (crashedLast && crashed(t, i) ? 1 : 0);
+    const order = [...seats].sort(
+      (a, b) => out(a) - out(b) || far[t * cars + b] - far[t * cars + a] || a - b,
+    );
     order.forEach((i, k) => (place[t * cars + i] = k));
   }
   const slide = new Float32Array(steps * cars);
@@ -618,7 +623,9 @@ function ellipse(ctx, x, y, r, fill, outline) {
 // so far, the metres it's covered, shown in the strip. With arrays.policy, the
 // policy's car, the rest are bots, and the camera follows the policy; without it,
 // every car is a member, in its seat's livery, and the camera follows the leader.
-// The camera follows the picked seat instead, when there is one.
+// The camera follows the picked seat instead, when there is one. With
+// arrays.crashed_last, (1,), the race placed crashed cars behind every car still
+// running, and so does the strip.
 export function f1tenth(arrays) {
   const { edges, poses, crashed } = arrays;
   const [steps, cars] = poses.shape;
@@ -673,7 +680,9 @@ export function f1tenth(arrays) {
   const hudTop = H - HUD_H, cell = W / cars, pad = 4, r = 11;
   const barY = hudTop + pad + 2 * r + 4;
   const roomy = cell >= 90;
-  const { place, slide, far } = raceOrder(center, pose, isCrashed, start, steps, cars);
+  // with arrays.crashed_last, the race ranked crashed cars behind the running ones
+  const crashedLast = arrays.crashed_last !== undefined && arrays.crashed_last.data[0] !== 0;
+  const { place, slide, far } = raceOrder(center, pose, isCrashed, start, steps, cars, crashedLast);
   const crossings = lapCrossings(far, center.length, isCrashed, steps, cars);
   // every lap anyone finished, [when, how long], to tell the fastest so far
   const allLaps = crossings.flatMap((done) => done.slice(1).map((c, k) => [c, c - done[k]]));

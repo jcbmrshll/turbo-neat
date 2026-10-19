@@ -149,6 +149,7 @@ class F1TenthRace:
         assert reward in ("distance", "placement"), f"no reward {reward!r}"
         self.num_players = num_cars
         self.max_speed = max_speed
+        self.crashed_last = crashed_last
         self.env = env = make(
             f"{map_name}_{num_cars}_noscan_nocollision_progress"
             f"_velocity+steeringangle_{timestep_ratio}_v0",
@@ -713,6 +714,10 @@ def make_episode_fn(race: F1TenthRace):
             rewards=np.asarray(rewards),
             obs=obs,
         )
+        if race.crashed_last and not against_bots:
+            # the monitor ranks crashed cars behind every car still racing, as
+            # the reward does
+            data["crashed_last"] = np.ones(races + (1,), np.float32)
         if against_bots:
             data["policy"] = np.asarray(state.seat[0])
             data["obs_seats"] = np.asarray(state.seat[:1])
