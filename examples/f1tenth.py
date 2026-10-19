@@ -247,9 +247,15 @@ class F1TenthRace:
             i, j = np.triu_indices(num_cars, 1)
             pairs = jax.vmap(collision)(jnp.concatenate((corners[i], corners[j]), -1))
             hit_car = jnp.zeros(num_cars, bool).at[i].max(pairs).at[j].max(pairs)
-            state = state.replace(
-                collisions=state.collisions | hit_wall | off_track | hit_car
-            )
+            # a car out of the race, whatever put it out, is a standing wreck: no
+            # speed, yaw rate or slip, so the others sense it standing still
+            out = state.collisions | hit_wall | off_track | hit_car
+            cars = state.cartesian_states
+            # columns x, y, steer, speed, yaw, then yaw rate and slip
+            column = jnp.arange(cars.shape[1])
+            moving = (column == 3) | (column >= 5)
+            cars = jnp.where(out[:, None] & moving, 0.0, cars)
+            state = state.replace(collisions=out, cartesian_states=cars)
             return state, hit_car
 
         def progress(state: State) -> jax.Array:
