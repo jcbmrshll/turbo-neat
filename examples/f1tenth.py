@@ -439,13 +439,15 @@ class F1TenthRace:
             return state, rewards, env_state.collisions.all()
 
         def stats(state: RaceState) -> dict:
-            """Each car's average lap time in seconds over the laps it completed
-            (NaN without one), how many times it passed a car still racing,
+            """Each car's distance covered in metres, its average lap time in
+            seconds over the laps it completed (NaN without one), how many times it
+            passed a car still racing,
             whether it crashed, and whether into another car, and its average and
             top speed while it was still racing (NaN if it never was): of a race,
             or a batch of races."""
             raced = state.racing_steps > 0
             return dict(
+                distance=state.rewards,
                 lap_time=jnp.where(
                     state.laps > 0,
                     state.lap_steps * dt / jnp.maximum(state.laps, 1),
