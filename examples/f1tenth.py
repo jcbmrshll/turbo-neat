@@ -78,6 +78,8 @@ RECORD_HZ = 20
 GRID_SPACING, GRID_OFFSET = 8.0, 0.4
 # a car this far off the centerline has left the track (Spielberg is 2.2m wide)
 MAX_LATERAL_ERROR = 1.5
+# seconds over which a car's acceleration noise (with --accel-noise) drifts
+ACCEL_NOISE_TIME = 0.5
 
 
 @jax.tree_util.register_dataclass
@@ -106,6 +108,8 @@ class RaceState:
     top_speed: jax.Array
     # whether each car is out from touching another car (racing or a wreck)
     car_crashes: jax.Array
+    # each car's acceleration error this step, in m/s^2
+    accel_noise: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -134,6 +138,8 @@ class F1TenthRace:
         max_speed: float = 20.0,
         grid_spacing: float = GRID_SPACING,
         crash_penalty: float = 0.0,
+        grid_spacing_jitter: float = 0.0,
+        accel_noise: float = 0.0,
     ):
         self.num_players = num_cars
         self.max_speed = max_speed
@@ -295,13 +301,21 @@ class F1TenthRace:
 
         def reset_fn(key: jax.Array) -> RaceState:
             next_key, key = jax.random.split(key)
+            gap_key, noise_key = jax.random.split(jax.random.fold_in(key, 1))
             _, env_state = env.reset(key)
             # the env lines the cars up nose to tail; start from a staggered grid
-            # instead, from the place on the track it picked at random
+            # instead, from the place on the track it picked at random, each gap
+            # grid_spacing_jitter either side of grid_spacing
             places = jnp.arange(num_cars)
+            gaps = (
+                grid_spacing
+                + jax.random.uniform(gap_key, (num_cars - 1,), minval=-1.0, maxval=1.0)
+                * grid_spacing_jitter
+            )
+            behind = jnp.concatenate((jnp.zeros(1), jnp.cumsum(gaps)))
             frenet = jnp.column_stack(
                 (
-                    env_state.frenet_states[0, 0] - grid_spacing * places,
+                    env_state.frenet_states[0, 0] - behind,
                     jnp.where(places % 2 == 0, 1.0, -1.0) * GRID_OFFSET,
                     jnp.zeros(num_cars),
                 )
@@ -329,10 +343,17 @@ class F1TenthRace:
                 speed_sum=jnp.zeros(num_cars),
                 top_speed=jnp.zeros(num_cars),
                 car_crashes=jnp.zeros(num_cars, bool),
+                accel_noise=accel_noise * jax.random.normal(noise_key, (num_cars,)),
             )
+
+        # the acceleration noise drifts (an Ornstein-Uhlenbeck process), keeping a
+        # standard deviation of accel_noise
+        noise_decay = np.exp(-self.dt / ACCEL_NOISE_TIME)
+        noise_kick = accel_noise * np.sqrt(1 - noise_decay**2)
 
         def step_fn(state: RaceState, actions: jax.Array):
             next_key, key = jax.random.split(state.key)
+            noise_key = jax.random.fold_in(key, 1)
             actions = jnp.clip(actions, -1.0, 1.0)
             controls = jnp.column_stack(
                 (actions[:, 0] * params.s_max, (actions[:, 1] + 1) / 2 * max_speed)
@@ -340,6 +361,23 @@ class F1TenthRace:
             _, env_state, _, _, _ = env.step_env(
                 key, state.env_state, dict(zip(env.agents, controls))
             )
+            # the cars still racing speed up or slow down by their noise, which the
+            # speed controller then works against
+            noise = noise_decay * state.accel_noise + noise_kick * jax.random.normal(
+                noise_key, (num_cars,)
+            )
+            if accel_noise > 0:
+                speed = jnp.clip(
+                    env_state.cartesian_states[:, 3] + noise * self.dt,
+                    params.v_min,
+                    params.v_max,
+                )
+                speed = jnp.where(
+                    env_state.collisions, env_state.cartesian_states[:, 3], speed
+                )
+                env_state = env_state.replace(
+                    cartesian_states=env_state.cartesian_states.at[:, 3].set(speed)
+                )
             # the car that crashes this step keeps the progress it made up to the
             # crash, and the env freezes it in place from the next
             env_state, hit_car = settle(env_state)
@@ -375,6 +413,7 @@ class F1TenthRace:
                 speed_sum=state.speed_sum + speed,
                 top_speed=jnp.maximum(state.top_speed, speed),
                 car_crashes=state.car_crashes | (crashed & hit_car),
+                accel_noise=noise,
             )
             return state, rewards, env_state.collisions.all()
 
@@ -718,6 +757,20 @@ def main():
         help="metres between places on the starting grid",
     )
     parser.add_argument(
+        "--grid-spacing-jitter",
+        type=float,
+        default=0.0,
+        help="metres either side of --grid-spacing each gap on the grid is drawn "
+        "from, in training races",
+    )
+    parser.add_argument(
+        "--accel-noise",
+        type=float,
+        default=0.0,
+        help="standard deviation of the noise in each car's acceleration, in m/s^2, "
+        f"drifting over {ACCEL_NOISE_TIME} s, in training races",
+    )
+    parser.add_argument(
         "--test-grid-spacing",
         type=float,
         default=None,
@@ -745,6 +798,10 @@ def main():
         help=f"log to a turbo-neat monitor (default {DEFAULT_URL})",
     )
     args = parser.parse_args()
+    if not 0 <= args.grid_spacing_jitter < args.grid_spacing:
+        parser.error(
+            "--grid-spacing-jitter must be at least 0 and below --grid-spacing"
+        )
 
     race = F1TenthRace(
         args.cars,
@@ -752,19 +809,26 @@ def main():
         max_speed=args.max_speed,
         grid_spacing=args.grid_spacing,
         crash_penalty=args.crash_penalty,
+        grid_spacing_jitter=args.grid_spacing_jitter,
+        accel_noise=args.accel_noise,
     )
     race_steps = round(args.race_seconds / race.dt)
     # a race is done when every car is out, but it doesn't start over: the wrecks
     # just stand there, so score straight through and keep the last crash in replays
     max_resets = None
     test_steps = round((args.test_seconds or args.race_seconds) / race.dt)
+    # the test races start from an even grid, without noise
     test_race = race
-    if args.test_grid_spacing is not None:
+    if (
+        args.test_grid_spacing is not None
+        or args.grid_spacing_jitter
+        or args.accel_noise
+    ):
         test_race = F1TenthRace(
             args.cars,
             map_name=args.map,
             max_speed=args.max_speed,
-            grid_spacing=args.test_grid_spacing,
+            grid_spacing=args.test_grid_spacing or args.grid_spacing,
         )
     if args.test == "bots":
         test_fn = make_top_k_test(
