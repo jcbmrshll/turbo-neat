@@ -78,6 +78,9 @@ RECORD_HZ = 20
 GRID_SPACING, GRID_OFFSET = 8.0, 0.4
 # a car this far off the centerline has left the track (Spielberg is 2.2m wide)
 MAX_LATERAL_ERROR = 1.5
+# a pass counts once a car is this many car lengths ahead of the other, and it has
+# to drop as far behind before it can pass that car again
+PASS_MARGIN = 1.0
 # seconds over which a car's acceleration noise (with --accel-noise) drifts
 ACCEL_NOISE_TIME = 0.5
 
@@ -99,15 +102,19 @@ class RaceState:
     # step it completed the last one on
     laps: jax.Array
     lap_steps: jax.Array
-    # how many times each car passed (or lapped) a car still in the race
+    # how many times each car passed (or lapped) a car still in the race, and
+    # (cars, cars) how many laps each car counts as ahead of each other one
     passes: jax.Array
+    laps_ahead: jax.Array
     # each car's steps still racing, the sum of its speeds over them, and the
     # fastest of them, in m/s
     racing_steps: jax.Array
     speed_sum: jax.Array
     top_speed: jax.Array
-    # whether each car is out from touching another car (racing or a wreck)
+    # whether each car is out from touching another car (racing or a wreck), or
+    # from anything else: a wall, or leaving the track
     car_crashes: jax.Array
+    wall_crashes: jax.Array
     # each car's acceleration error this step, in m/s^2
     accel_noise: jax.Array
     # each car's score for its place in the race so far, 1 leading to 0 last
@@ -258,17 +265,19 @@ class F1TenthRace:
                 jnp.where(gain < -half, gain + env.track_length, gain),
             )
 
-        def passes(before, after, racing):
-            """How many times each car got a lap further on than another car still
-            racing, between positions before and after along the track (counting
-            laps): passing it, or lapping it."""
+        margin = PASS_MARGIN * params.length
 
-            def laps_ahead(position):
-                gap = position[:, None] - position[None, :]
-                return jnp.floor(gap / env.track_length)
-
-            gained = jnp.maximum(laps_ahead(after) - laps_ahead(before), 0.0)
-            return (gained * racing[None, :]).sum(axis=1).astype(jnp.int32)
+        def passes(laps_ahead, position, racing):
+            """Each car's laps ahead of each other one at position along the track
+            (counting laps), going up a lap once it's margin past it and down once
+            it's margin short of it, and how many times each car went up on a car
+            still racing: passed it, or lapped it."""
+            gap = position[:, None] - position[None, :]
+            lap = env.track_length
+            up = gap >= (laps_ahead + 1) * lap + margin
+            down = gap < laps_ahead * lap - margin
+            laps_ahead = laps_ahead + up - down
+            return laps_ahead, (up & racing[None, :]).sum(axis=1).astype(jnp.int32)
 
         def observe(state: State) -> jax.Array:
             x, y, steer, speed, yaw, yaw_rate, slip = state.cartesian_states.T
@@ -350,10 +359,14 @@ class F1TenthRace:
                 laps=zeros,
                 lap_steps=zeros,
                 passes=zeros,
+                laps_ahead=jnp.floor(
+                    (frenet[:, None, 0] - frenet[None, :, 0]) / env.track_length
+                ).astype(jnp.int32),
                 racing_steps=zeros,
                 speed_sum=jnp.zeros(num_cars),
                 top_speed=jnp.zeros(num_cars),
                 car_crashes=jnp.zeros(num_cars, bool),
+                wall_crashes=jnp.zeros(num_cars, bool),
                 accel_noise=accel_noise * jax.random.normal(noise_key, (num_cars,)),
                 place=jnp.zeros(num_cars),
             )
@@ -419,6 +432,7 @@ class F1TenthRace:
             )
             # a step the car crashed on, or any after, isn't racing
             racing = ~env_state.collisions
+            laps_ahead, passed = passes(state.laps_ahead, state.start + total, racing)
             speed = jnp.where(racing, env_state.cartesian_states[:, 3], 0.0)
             state = RaceState(
                 env_state=env_state,
@@ -429,16 +443,13 @@ class F1TenthRace:
                 start=state.start,
                 laps=laps,
                 lap_steps=jnp.where(laps > state.laps, steps, state.lap_steps),
-                passes=state.passes
-                + passes(
-                    state.start + state.rewards,
-                    state.start + total,
-                    racing,
-                ),
+                passes=state.passes + passed,
+                laps_ahead=laps_ahead,
                 racing_steps=state.racing_steps + racing,
                 speed_sum=state.speed_sum + speed,
                 top_speed=jnp.maximum(state.top_speed, speed),
                 car_crashes=state.car_crashes | (crashed & hit_car),
+                wall_crashes=state.wall_crashes | (crashed & ~hit_car),
                 accel_noise=noise,
                 place=place,
             )
@@ -447,8 +458,8 @@ class F1TenthRace:
         def stats(state: RaceState) -> dict:
             """Each car's distance covered in metres, its average lap time in
             seconds over the laps it completed (NaN without one), how many times it
-            passed a car still racing,
-            whether it crashed, and whether into another car, and its average and
+            passed a car still racing (by a car length), whether it crashed, and
+            whether into another car or anything else, and its average and
             top speed while it was still racing (NaN if it never was): of a race,
             or a batch of races."""
             raced = state.racing_steps > 0
@@ -462,6 +473,7 @@ class F1TenthRace:
                 passes=state.passes.astype(jnp.float32),
                 crashes=state.env_state.collisions.astype(jnp.float32),
                 car_crashes=state.car_crashes.astype(jnp.float32),
+                wall_crashes=state.wall_crashes.astype(jnp.float32),
                 avg_speed=jnp.where(
                     raced,
                     state.speed_sum / jnp.maximum(state.racing_steps, 1),
