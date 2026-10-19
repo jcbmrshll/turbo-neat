@@ -731,6 +731,14 @@ def main():
         "the 10 fittest each race the bots",
     )
     parser.add_argument(
+        "--field-ranks",
+        type=int,
+        nargs="+",
+        default=None,
+        help="the field test's cars by their rank in fitness (1 the fittest), one "
+        "per car, for a field of mixed strength; if not, the --cars fittest",
+    )
+    parser.add_argument(
         "--field-races",
         type=int,
         default=16,
@@ -798,6 +806,10 @@ def main():
         help=f"log to a turbo-neat monitor (default {DEFAULT_URL})",
     )
     args = parser.parse_args()
+    if args.field_ranks is not None and (
+        len(args.field_ranks) != args.cars or max(args.field_ranks) > args.population
+    ):
+        parser.error("--field-ranks needs one rank per car, none above --population")
     if not 0 <= args.grid_spacing_jitter < args.grid_spacing:
         parser.error(
             "--grid-spacing-jitter must be at least 0 and below --grid-spacing"
@@ -854,6 +866,7 @@ def main():
             size=args.cars,
             # just their stats: distance is what fitness already logs
             name=None,
+            ranks=args.field_ranks,
         )
 
     neat = NEAT(

@@ -9,7 +9,7 @@ logs. make_top_k_test and make_field_test build the common ones."""
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -72,13 +72,18 @@ def field_test(
     test_fn: Callable[..., Tuple[jax.Array, Any, Dict[str, jax.Array]]],
     size: int,
     name: Optional[str],
+    ranks: Optional[Tuple[int, ...]] = None,
     **kwargs,
 ) -> TestResult:
     """Tests the size fittest genomes against each other, fittest in the first seat,
-    logging the best and the mean of their scores as max_<name> and mean_<name>
+    or with ranks, the genomes at those ranks by fitness (1 the fittest), logging the best and the mean of their scores as max_<name> and mean_<name>
     (not with no name), and the mean, least and most of each of the test's stats
     (see neat.fitness.describe_stats), with the test's episode."""
-    field = fittest(genome, size)
+    if ranks is None:
+        field = fittest(genome, size)
+    else:
+        top = fittest(genome, max(ranks))
+        field = jax.tree.map(lambda x: x[jnp.array(ranks) - 1], top)
     scores, episode, stats = test_fn(rng=rng, genome=field, **kwargs)
     metrics = describe_stats(stats)
     if name is not None:
@@ -103,10 +108,16 @@ def make_field_test(
     test_fn: Callable[..., Tuple[jax.Array, Any, Dict[str, jax.Array]]],
     size: int,
     name: Optional[str] = "field",
+    ranks: Optional[Sequence[int]] = None,
 ) -> PopulationTestFn:
     """A population test from a game between a batch of genomes, returning each
     one's score, an episode and each one's stats (see
-    neat.fitness.make_mp_field_fn): the size fittest play it (see field_test).
-    With name None, it logs no scores, just the stats."""
+    neat.fitness.make_mp_field_fn): the size fittest play it, or the size genomes
+    at ranks by fitness, 1 being the fittest, for a field of mixed strength (see
+    field_test). With name None, it logs no scores, just the stats."""
     assert size > 0, "a field test needs at least one genome"
-    return partial(field_test, test_fn=test_fn, size=size, name=name)
+    if ranks is not None:
+        ranks = tuple(ranks)
+        assert len(ranks) == size, "a field test needs a rank for every genome"
+        assert len(set(ranks)) == size and min(ranks) >= 1, "ranks are distinct, from 1"
+    return partial(field_test, test_fn=test_fn, size=size, name=name, ranks=ranks)
