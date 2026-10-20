@@ -453,18 +453,21 @@ class F1TenthRace:
             noise = noise_decay * state.accel_noise + noise_kick * jax.random.normal(
                 noise_key, (num_cars,)
             )
+            speed = env_state.cartesian_states[:, 3]
             if accel_noise > 0:
-                speed = jnp.clip(
-                    env_state.cartesian_states[:, 3] + noise * self.dt,
-                    params.v_min,
-                    params.v_max,
-                )
-                speed = jnp.where(
-                    env_state.collisions, env_state.cartesian_states[:, 3], speed
-                )
-                env_state = env_state.replace(
-                    cartesian_states=env_state.cartesian_states.at[:, 3].set(speed)
-                )
+                speed = jnp.clip(speed + noise * self.dt, params.v_min, params.v_max)
+            # never below standing still: the cars are only ever told to go forward,
+            # and the single-track model moves a car at no less than 1mm/s, but pulls
+            # its speed down 0.1 m/s every second it's told to stop (it steers
+            # towards the target from that 1mm/s), so a parked car's speed would run
+            # down to the env's -5 m/s while it stood still
+            speed = jnp.maximum(speed, 0.0)
+            speed = jnp.where(
+                env_state.collisions, env_state.cartesian_states[:, 3], speed
+            )
+            env_state = env_state.replace(
+                cartesian_states=env_state.cartesian_states.at[:, 3].set(speed)
+            )
             # the car that crashes this step keeps the progress it made up to the
             # crash, and the env freezes it in place from the next
             env_state, hit_car = settle(env_state)
