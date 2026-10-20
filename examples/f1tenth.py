@@ -1,30 +1,36 @@
 """Race F1TENTH cars by self-play.
 
-Genomes are shuffled into races of --cars cars on one of F1TENTH's tracks, and each
-scores the distance it covers before the clock runs out. A car that touches a wall
-or another car is out of the race, and stays on the track as a wreck for the others
-to avoid. Each car sees a lidar sweep, its own speed, steering and heading, and the
-cars around it.
+Each generation, every genome races --rounds times in races of --cars cars on one
+of F1TENTH's tracks, and scores the place it finishes in: 1 for first down to 0
+for last, by how far round the track it is from the start line, plus a little for
+the distance it covers (--distance-bonus, for covering --max-speed x
+--race-seconds), so that a leader has no reason to stop. A car that touches a
+wall or another car is out of the race, and stays on the track as a wreck where it
+stopped, holding its place until the others pass it. The grid is in rows of two
+(--cars-per-row), and every genome starts from every place on it equally often
+(--balance-grid), so that its mean starting place is the same as every other's.
+Each car sees a lidar sweep of the walls and the other cars (each beam also
+sweeping the angle to the next for cars, so none can hide between beams), its own
+speed, steering, yaw rate, slip and position on the track, and the cars around it.
 
-To see how good the best are, every --test-every generations the --cars fittest
-race each other (--field-races races, starting from every place on the grid in
-turn), and the monitor shows one of their races and logs five stats of each car in
-them: its average lap time in seconds, over the laps it completed (a lap being the
-track's length from its place on the grid), how many times it passed a car that was
-still racing, whether it crashed, and its average and top speed in m/s while it was
-still racing. Each is the car's mean over the races (lap time over those it
-completed a lap in), and the monitor charts the mean, least and most over the cars
-(lap_time, passes, crashes, avg_speed, top_speed). With --test bots, the 10 fittest
-each race pure pursuit bots that follow the track's centerline instead, scoring the
-distance they cover, and the monitor shows the best one's race.
+Every generation logs stats of the cars in those races, each a car's mean over its
+races: the distance it covered; its average lap time in seconds over the laps it
+completed (a lap being the track's length from its place on the grid); how many
+times it passed a car still racing (by a car length); whether it crashed, into
+another car or anything else; and its average and top speed while it was racing.
+The monitor charts their mean, least and most over the population (distance,
+lap_time, passes, crashes, car_crashes, wall_crashes, avg_speed, top_speed).
+Every --test-every generations, a field of mixed strength (the genomes at ranks
+--field-ranks in fitness) race each other from a grid in no order of fitness, for
+the monitor to show. With --test bots, the 10 fittest each race pure pursuit bots
+that follow the track's centerline instead.
 
-The defaults race 11 cars, 8 m apart on the grid, 20 races per genome each
-generation, in 20-second races, and test the field in 120-second races. Self-play
-takes a while to get going: in three runs of them, the cars only learned to race
-past the first corner after about 130, 180 and 550 generations. Two of those
-fields went on to cover more than a lap of Spielberg (about 343 m) in a test race,
-the faster by generation 350. 1000 generations take about 5.5 hours on an RTX
-5080.
+Self-play takes a while to get going: in a run of the defaults on Spielberg (a 343
+m lap), the cars stayed near the grid for about 100 generations, then took to the
+track: by generation 200 the average car covered 0.9 of a lap in a 60-second race,
+and by 500 it covered 1.3 laps (the best about 1.75), its laps taking 37 seconds
+(the fastest 32), with a quarter of the cars crashing (from 80% at generation 100).
+1000 generations take about 11 hours on an RTX 5080.
 
     uv run examples/f1tenth.py
     uv run examples/f1tenth.py --monitor
@@ -34,7 +40,7 @@ Start the monitor first with `uv run turbo-neat-monitor`.
 
 import argparse
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -75,7 +81,10 @@ WALL_CHECK_SPACING = 0.1
 # control rate
 RECORD_HZ = 20
 # the starting grid: metres between places, and either side of the centerline
-GRID_SPACING, GRID_OFFSET = 8.0, 0.4
+GRID_SPACING, GRID_OFFSET = 6.0, 0.4
+# the field test's cars by their rank in fitness, for 6 cars: a field of mixed
+# strength, in no order on the grid, so that the fast catch the slow
+FIELD_RANKS = (1, 2, 8, 16, 64, 128)
 # a car this far off the centerline has left the track (Spielberg is 2.2m wide)
 MAX_LATERAL_ERROR = 1.5
 # a pass counts once a car is this many car lengths ahead of the other, and it has
@@ -674,6 +683,7 @@ def make_config(
     num_cars: int,
     population_size: int = 1000,
     speciation_threshold: float = 2.0,
+    target_species: Optional[int] = None,
 ) -> NEATConfig:
     mutation_config = MutationConfig(
         add_connection_prob=0.05,
@@ -728,10 +738,10 @@ def make_config(
             minimum_stagnation=20, full_target=maximum_species
         ),
         maximum_species=maximum_species,
-        # the threshold adapts to keep this many species (speciation_threshold is
-        # where it starts): genomes converge as a run goes on, and a fixed threshold
-        # that splits them early on stops splitting them later
-        target_species=maximum_species,
+        # with a target, the threshold adapts to keep that many species
+        # (speciation_threshold is where it starts): genomes converge as a run goes
+        # on, and a fixed threshold that splits them early stops splitting them later
+        target_species=target_species,
         selection_tournament_size=5,
         fitness_ema_period=5,
     )
@@ -830,7 +840,11 @@ def main():
         "--race-seconds",
     )
     parser.add_argument(
-        "--rounds", type=int, default=7, help="races each genome runs per generation"
+        "--rounds",
+        type=int,
+        default=6,
+        help="races each genome runs per generation (a multiple of --cars, with "
+        "--balance-grid, starts each from every place on the grid equally often)",
     )
     parser.add_argument(
         "--parallel-rounds",
@@ -853,7 +867,8 @@ def main():
         nargs="+",
         default=None,
         help="the field test's cars by their rank in fitness (1 the fittest), one "
-        "per car, for a field of mixed strength; if not, the --cars fittest",
+        f"per car, for a field of mixed strength ({' '.join(map(str, FIELD_RANKS))} "
+        "by default with 6 cars, otherwise the --cars fittest)",
     )
     parser.add_argument(
         "--field-races",
@@ -885,7 +900,7 @@ def main():
         "--cars-per-row",
         type=int,
         choices=(1, 2),
-        default=1,
+        default=2,
         help="cars side by side in each row of the starting grid: 1 for single "
         "file, 2 for pairs as on an F1 grid; rows are --grid-spacing apart",
     )
@@ -913,27 +928,28 @@ def main():
     parser.add_argument(
         "--reward",
         choices=("distance", "placement"),
-        default="distance",
+        default="placement",
         help="what a car scores in a race: the distance it covers, or its place at "
         "the finish (1 for first down to 0 for last)",
     )
     parser.add_argument(
         "--distance-bonus",
         type=float,
-        default=0.0,
+        default=0.1,
         help="with --reward placement, also this for covering --max-speed x "
         "--race-seconds, and as much less for less (0.1 is half a place's "
         "worth at the most, with 6 cars), so the leader has a reason not to stop",
     )
     parser.add_argument(
         "--lidar-cars",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="the lidar sees the other cars (and wrecks) as well as the walls",
     )
     parser.add_argument(
         "--lidar-rays",
         type=int,
-        default=1,
+        default=8,
         help="with --lidar-cars, rays each lidar beam also sweeps its sector with, "
         "reading the nearest car any of them hits, so that a car can't hide between "
         "beams (walls still read along the beam)",
@@ -946,7 +962,8 @@ def main():
     )
     parser.add_argument(
         "--balance-grid",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="start every genome from every place on the grid equally often over "
         "its races (exactly so when --rounds is a multiple of --cars)",
     )
@@ -961,7 +978,14 @@ def main():
         "--speciation-threshold",
         type=float,
         default=2.0,
-        help="genome distance beyond which a genome starts a new species",
+        help="genome distance beyond which a genome starts a new species (where it "
+        "starts, with --target-species)",
+    )
+    parser.add_argument(
+        "--target-species",
+        type=int,
+        default=None,
+        help="adapt the speciation threshold to keep this many species (at most 5)",
     )
     parser.add_argument(
         "--monitor",
@@ -972,6 +996,8 @@ def main():
         help=f"log to a turbo-neat monitor (default {DEFAULT_URL})",
     )
     args = parser.parse_args()
+    if args.field_ranks is None and args.cars == len(FIELD_RANKS):
+        args.field_ranks = list(FIELD_RANKS)
     if args.field_ranks is not None and (
         len(args.field_ranks) != args.cars or max(args.field_ranks) > args.population
     ):
@@ -1052,6 +1078,7 @@ def main():
             args.cars,
             args.population,
             args.speciation_threshold,
+            args.target_species,
         ),
         # the first round's races are recorded for the monitor's lineage view
         fitness_fn=make_mp_fitness_fn(
