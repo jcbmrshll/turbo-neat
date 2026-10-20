@@ -290,10 +290,9 @@ const CAR_PARTS = [
   [mirrored([[0.5, 0.18], [0.44, 0.47], [0.4, 0.47]]), "wings"], // front wing
   [BODY[0], "left"],
   [BODY[1], "right"],
-  // tyres, the rear ones wider
-  ...[[-0.42, -0.2, 0.3, 0.5], [0.15, 0.33, 0.31, 0.48]].flatMap(([x0, x1, y0, y1]) =>
-    [1, -1].map((side) => [rect(x0, x1, y0 * side, y1 * side), "dark"]),
-  ),
+  // tyres, the rear ones wider; the front ones turn with the steering
+  ...[1, -1].map((side) => [rect(-0.42, -0.2, 0.3 * side, 0.5 * side), "dark"]),
+  ...[1, -1].map((side) => [rect(0.15, 0.33, 0.31 * side, 0.48 * side), "dark", "steers"]),
   [mirrored([[0.11, 0.04], [0.06, 0.07], [-0.08, 0.07]]), "dark"], // cockpit
   [rect(-0.6, -0.49, -0.13, 0.13), "light"], // the rain light, behind the wing
 ];
@@ -654,11 +653,15 @@ export function f1tenth(arrays) {
   const liveries = carLiveries(cars, policy);
   const fills = liveries.map((lv) => [carFills(lv, false), carFills(lv, true)]);
   const [length, width] = arrays.car_size.data;
-  const parts = CAR_PARTS.map(([shape, kind]) => {
+  // each part's path in pixels; a part that steers, around its own centre, with
+  // where that centre is, to turn it there
+  const parts = CAR_PARTS.map(([shape, kind, steers]) => {
+    const px = shape.map(([x, y]) => [x * length * CAR_SCALE * scale, y * width * CAR_SCALE * scale]);
+    const at = steers ? [0, 1].map((d) => px.reduce((sum, p) => sum + p[d], 0) / px.length) : null;
     const path = new Path2D();
-    for (const [x, y] of shape) path.lineTo(x * length * CAR_SCALE * scale, y * width * CAR_SCALE * scale);
+    for (const [x, y] of px) path.lineTo(x - (at ? at[0] : 0), y - (at ? at[1] : 0));
     path.closePath();
-    return [path, kind];
+    return [path, kind, at];
   });
   const reach = (length * CAR_SCALE * scale) / 2;
 
@@ -856,9 +859,19 @@ export function f1tenth(arrays) {
         ctx.save();
         // y is up in the world and down on the screen
         ctx.transform(cos, -sin, -sin, -cos, x, y);
-        for (const [path, kind] of parts) {
+        // the front wheels at the car's steering angle, positive to the left
+        const steering = steer ? steer.data[t * cars + i] : 0;
+        for (const [path, kind, at] of parts) {
           ctx.fillStyle = kind === "light" && lit ? css(BRAKE_ON) : colors[kind];
-          ctx.fill(path);
+          if (at) {
+            ctx.save();
+            ctx.translate(at[0], at[1]);
+            ctx.rotate(steering);
+            ctx.fill(path);
+            ctx.restore();
+          } else {
+            ctx.fill(path);
+          }
         }
         ctx.restore();
       }
