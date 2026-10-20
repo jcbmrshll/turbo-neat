@@ -108,7 +108,8 @@ export function showTip(x, y, ...children) {
   tip ??= h("div", { class: "neat-tip", hidden: true });
   const over = document.fullscreenElement ?? document.body;
   if (tip.parentNode !== over) over.append(tip);
-  tip.replaceChildren(...children);
+  // rows left out (null or false), as h leaves them out
+  tip.replaceChildren(...children.filter((c) => c != null && c !== false));
   tip.hidden = false;
   const r = tip.getBoundingClientRect();
   const left = x + 14 + r.width > innerWidth ? x - 14 - r.width : x + 14;
@@ -353,6 +354,8 @@ export function networkView(net, width, trace = null, { height = 480 } = {}) {
   let frame = 0;
   const valueAt = (id) => trace.values[frame * trace.nodes + col.get(id)];
   const nodeEls = [];
+  // the hovered node's output in its tip, [element, id], kept up as the episode plays
+  let hovered = null;
   for (const n of nodes.values()) {
     const r = n.kind === "hidden" ? 4.5 : wide && n.kind === "input" ? 2.6 : 5;
     const node = h("circle", { class: `node ${n.kind}${trace ? " lit" : ""}`, cx: n.x, cy: n.y, r });
@@ -368,12 +371,13 @@ export function networkView(net, width, trace = null, { height = 480 } = {}) {
         h("div", { class: "head", text: n.label ? `${n.kind} · ${n.label}` : `${n.kind} · node ${n.id}` }),
         h("div", { class: "row" }, h("b", { text: n.activation })),
         n.kind !== "input" && h("div", { class: "row" }, "bias ", h("b", { text: fmt(n.bias) })),
-        trace && h("div", { class: "row" }, "output ", h("b", { text: fmt(valueAt(n.id)) })),
+        trace && h("div", { class: "row" }, "output ", (hovered = [h("b", { text: fmt(valueAt(n.id)) }), n.id])[0]),
         trace && h("div", { class: "row" }, "over the episode ", h("b", { text: `${fmt(range.lo[col.get(n.id)])} to ${fmt(range.hi[col.get(n.id)])}` })),
       );
     });
     node.addEventListener("pointerleave", () => {
       edgeEls.forEach((el) => el.classList.remove("dim"));
+      hovered = null;
       hideTip();
     });
     svg.append(node);
@@ -409,6 +413,7 @@ export function networkView(net, width, trace = null, { height = 480 } = {}) {
       el.style.opacity = most > 0 ? (0.06 + (0.84 * Math.abs(carried)) / most).toFixed(3) : 0.06;
     }
     for (const [el, id] of valueEls) el.textContent = fmtValue(valueAt(id));
+    if (hovered) hovered[0].textContent = fmt(valueAt(hovered[1]));
   };
   return { svg, summary, show };
 }
