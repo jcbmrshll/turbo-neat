@@ -728,6 +728,10 @@ def make_config(
             minimum_stagnation=20, full_target=maximum_species
         ),
         maximum_species=maximum_species,
+        # the threshold adapts to keep this many species (speciation_threshold is
+        # where it starts): genomes converge as a run goes on, and a fixed threshold
+        # that splits them early on stops splitting them later
+        target_species=maximum_species,
         selection_tournament_size=5,
         fitness_ema_period=5,
     )

@@ -124,8 +124,10 @@ def speciate(population: Population, selection_config: SelectionConfig) -> Popul
             mean_distances,
             new_i.species_id,
             new_i.fitness,
-            selection_config.speciation_threshold,
+            species_data.threshold,
             max_transfer_age=selection_config.max_transfer_age,
+            # with a target, new species only start while there are fewer
+            species_limit=selection_config.target_species,
         )
 
         new = replace(new, species_id=new.species_id.at[idx].set(assigned_species))
@@ -136,6 +138,25 @@ def speciate(population: Population, selection_config: SelectionConfig) -> Popul
     species_data = remove_extinct_species(population.species_data)
     species_data = next_gen(species_data, selection_config.fitness_ema_period)
     species_data = remove_stagnant_species(species_data, selection_config.stagnation_fn)
+    if selection_config.target_species is not None:
+        # nudge the threshold towards the number of species wanted
+        count = species_data.mask.sum()
+        step = selection_config.speciation_threshold_step
+        threshold = jnp.where(
+            count < selection_config.target_species,
+            species_data.threshold / step,
+            species_data.threshold,
+        )
+        # the threshold only decides when a new species starts (a member always
+        # joins its nearest species), so above the furthest any member was from its
+        # nearest species it would only wind up: keep it within a step of that
+        threshold = jnp.where(
+            species_data.distance_count > 0,
+            jnp.minimum(threshold, species_data.distance_max * step),
+            threshold,
+        )
+        threshold = jnp.maximum(threshold, selection_config.min_speciation_threshold)
+        species_data = replace(species_data, threshold=threshold)
     return replace(population, species_data=species_data)
 
 
@@ -460,7 +481,9 @@ def _init_population(
         next_genome_id=jnp.int32(next_genome_id),
         generation=jnp.int32(generation),
         species_data=init_species_data(
-            selection_config.maximum_species, next_species_id
+            selection_config.maximum_species,
+            next_species_id,
+            selection_config.speciation_threshold,
         ),
         add_node_prob=mutation_config.add_node_prob,
         add_connection_prob=mutation_config.add_connection_prob,

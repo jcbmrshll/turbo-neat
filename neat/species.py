@@ -30,6 +30,8 @@ class SpeciesData:
     distance_max: jax.Array
     distance_sum: jax.Array
     distance_count: jax.Array
+    # the speciation threshold in use (see SelectionConfig.target_species)
+    threshold: jax.Array
 
 
 def next_gen(species_data: SpeciesData, ema_period: int) -> SpeciesData:
@@ -135,7 +137,11 @@ def assign_species(
     fitness: jax.Array,
     min_distance_threshold: Optional[float] = None,
     max_transfer_age: Optional[int] = None,
+    species_limit: Optional[int] = None,
 ) -> Tuple[SpeciesData, jax.Array]:
+    """Puts a member in the species nearest it, or starts a new species if every
+    species is further than min_distance_threshold and there are fewer than
+    species_limit (by default, as many as there's room for)."""
     transfer_age_limit = jnp.inf if max_transfer_age is None else max_transfer_age
 
     species_distances = jnp.where(species_data.mask, distances, jnp.inf)
@@ -144,8 +150,11 @@ def assign_species(
 
     create_new = False
     if min_distance_threshold is not None:
+        limit = species_data.species_id.shape[0]
+        if species_limit is not None:
+            limit = min(limit, species_limit)
         create_new = (min_distances > min_distance_threshold) & (
-            species_data.next_idx < species_data.species_id.shape[0]
+            species_data.next_idx < limit
         )
     # check if the species is too old to be transferred to
     assigned_species_id = jnp.where(
@@ -205,10 +214,11 @@ def get_species_stats(species_data: SpeciesData, prev_stats) -> Dict:
     # how far genomes were from the species nearest them: a genome further than the
     # speciation threshold starts a new one
     if species_data.distance_count > 0:
-        species_dict["max_speciation_distance"] = float(species_data.distance_max)
-        species_dict["mean_speciation_distance"] = float(
+        species_dict["speciation_distance/max"] = float(species_data.distance_max)
+        species_dict["speciation_distance/mean"] = float(
             species_data.distance_sum / species_data.distance_count
         )
+    species_dict["speciation_distance/threshold"] = float(species_data.threshold)
     return species_dict
 
 
@@ -345,7 +355,9 @@ def fill_prev_stats(prev_stats, cur_stats) -> Dict:
     return prev_stats
 
 
-def init_species_data(maximum_species: int, next_species_id: int = 0) -> SpeciesData:
+def init_species_data(
+    maximum_species: int, next_species_id: int = 0, threshold: float = 3.0
+) -> SpeciesData:
     return SpeciesData(
         next_idx=jnp.int32(0),
         next_species_id=jnp.int32(next_species_id),
@@ -362,6 +374,7 @@ def init_species_data(maximum_species: int, next_species_id: int = 0) -> Species
         distance_max=jnp.float32(0),
         distance_sum=jnp.float32(0),
         distance_count=jnp.int32(0),
+        threshold=jnp.float32(threshold),
     )
 
 
