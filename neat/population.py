@@ -104,6 +104,20 @@ def speciate(population: Population, selection_config: SelectionConfig) -> Popul
         mean_distances = jnp.where(
             species_counts > 0, species_distances / species_counts, jnp.inf
         )
+        # the distance to the nearest species, to log how close genomes come to
+        # starting a new one
+        nearest = jnp.min(jnp.where(species_data.mask, mean_distances, jnp.inf))
+        measured = jnp.isfinite(nearest)
+        species_data = replace(
+            species_data,
+            distance_max=jnp.where(
+                measured,
+                jnp.maximum(species_data.distance_max, nearest),
+                species_data.distance_max,
+            ),
+            distance_sum=species_data.distance_sum + jnp.where(measured, nearest, 0.0),
+            distance_count=species_data.distance_count + measured,
+        )
 
         species_data, assigned_species = assign_species(
             species_data,

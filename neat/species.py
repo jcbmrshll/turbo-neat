@@ -24,6 +24,12 @@ class SpeciesData:
     stagnation: jax.Array
     species_age: jax.Array
     mask: jax.Array
+    # each genome's distance to the species nearest it (its mean distance to that
+    # species' members) as it was speciated: the most, and the sum and count of
+    # those there was a species to measure to, this generation
+    distance_max: jax.Array
+    distance_sum: jax.Array
+    distance_count: jax.Array
 
 
 def next_gen(species_data: SpeciesData, ema_period: int) -> SpeciesData:
@@ -58,6 +64,9 @@ def reset_counts(species_data: SpeciesData) -> SpeciesData:
         species_data,
         cumulative_fitness=jnp.zeros_like(species_data.cumulative_fitness),
         species_size=jnp.zeros_like(species_data.species_size),
+        distance_max=jnp.zeros_like(species_data.distance_max),
+        distance_sum=jnp.zeros_like(species_data.distance_sum),
+        distance_count=jnp.zeros_like(species_data.distance_count),
     )
 
 
@@ -193,6 +202,13 @@ def get_species_stats(species_data: SpeciesData, prev_stats) -> Dict:
     for k, v in prev_stats.items():
         if k not in species_dict and "species_dominance" in k and v > 0.0:
             species_dict[k] = 0.0
+    # how far genomes were from the species nearest them: a genome further than the
+    # speciation threshold starts a new one
+    if species_data.distance_count > 0:
+        species_dict["max_speciation_distance"] = float(species_data.distance_max)
+        species_dict["mean_speciation_distance"] = float(
+            species_data.distance_sum / species_data.distance_count
+        )
     return species_dict
 
 
@@ -343,6 +359,9 @@ def init_species_data(maximum_species: int, next_species_id: int = 0) -> Species
         stagnation=jnp.zeros(maximum_species, dtype=jnp.int32),
         mask=jnp.zeros(maximum_species, dtype=jnp.bool_),
         species_age=jnp.zeros(maximum_species, dtype=jnp.int32),
+        distance_max=jnp.float32(0),
+        distance_sum=jnp.float32(0),
+        distance_count=jnp.int32(0),
     )
 
 
