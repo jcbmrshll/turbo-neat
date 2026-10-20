@@ -290,10 +290,9 @@ const CAR_PARTS = [
   [mirrored([[0.5, 0.18], [0.44, 0.47], [0.4, 0.47]]), "wings"], // front wing
   [BODY[0], "left"],
   [BODY[1], "right"],
-  // tyres, the rear ones wider
-  ...[[-0.42, -0.2, 0.3, 0.5], [0.15, 0.33, 0.31, 0.48]].flatMap(([x0, x1, y0, y1]) =>
-    [1, -1].map((side) => [rect(x0, x1, y0 * side, y1 * side), "dark"]),
-  ),
+  // tyres, the rear ones wider; the front ones turn with the steering
+  ...[1, -1].map((side) => [rect(-0.42, -0.2, 0.3 * side, 0.5 * side), "dark"]),
+  ...[1, -1].map((side) => [rect(0.15, 0.33, 0.31 * side, 0.48 * side), "dark", "steers"]),
   [mirrored([[0.11, 0.04], [0.06, 0.07], [-0.08, 0.07]]), "dark"], // cockpit
   [rect(-0.6, -0.49, -0.13, 0.13), "light"], // the rain light, behind the wing
 ];
@@ -466,12 +465,14 @@ const SLIDE_FRAMES = 10;
 // Each car's place in the race at each step, (steps, cars), 0 for the leader: by
 // how far round the lap it is, from the start line (not by distance covered: the
 // grid is spread out behind the line), a car that's out where it stopped, so it
-// keeps its place until someone passes the spot; level cars in grid order. And
+// keeps its place until someone passes the spot, or with crashedLast, behind every
+// car still running, the cars that are out in the order they stopped; level cars
+// in grid order. And
 // slide, where
 // each one's card is in the strip, in places: its place averaged over the last
 // SLIDE_FRAMES steps, so cards slide past each other rather than jump, the same
 // at any step whatever was played before it.
-function raceOrder(center, pose, crashed, start, steps, cars) {
+function raceOrder(center, pose, crashed, start, steps, cars, crashedLast = false) {
   const n = center.length;
   const far = lapProgress(center, pose, steps, cars);
   // from the start line: where each car began, a little behind it or ahead
@@ -489,7 +490,10 @@ function raceOrder(center, pose, crashed, start, steps, cars) {
   const place = new Int32Array(steps * cars);
   const seats = [...Array(cars).keys()];
   for (let t = 0; t < steps; t++) {
-    const order = [...seats].sort((a, b) => far[t * cars + b] - far[t * cars + a] || a - b);
+    const out = (i) => (crashedLast && crashed(t, i) ? 1 : 0);
+    const order = [...seats].sort(
+      (a, b) => out(a) - out(b) || far[t * cars + b] - far[t * cars + a] || a - b,
+    );
     order.forEach((i, k) => (place[t * cars + i] = k));
   }
   const slide = new Float32Array(steps * cars);
@@ -618,7 +622,9 @@ function ellipse(ctx, x, y, r, fill, outline) {
 // so far, the metres it's covered, shown in the strip. With arrays.policy, the
 // policy's car, the rest are bots, and the camera follows the policy; without it,
 // every car is a member, in its seat's livery, and the camera follows the leader.
-// The camera follows the picked seat instead, when there is one.
+// The camera follows the picked seat instead, when there is one. With
+// arrays.crashed_last, (1,), the race placed crashed cars behind every car still
+// running, and so does the strip.
 export function f1tenth(arrays) {
   const { edges, poses, crashed } = arrays;
   const [steps, cars] = poses.shape;
@@ -647,11 +653,15 @@ export function f1tenth(arrays) {
   const liveries = carLiveries(cars, policy);
   const fills = liveries.map((lv) => [carFills(lv, false), carFills(lv, true)]);
   const [length, width] = arrays.car_size.data;
-  const parts = CAR_PARTS.map(([shape, kind]) => {
+  // each part's path in pixels; a part that steers, around its own centre, with
+  // where that centre is, to turn it there
+  const parts = CAR_PARTS.map(([shape, kind, steers]) => {
+    const px = shape.map(([x, y]) => [x * length * CAR_SCALE * scale, y * width * CAR_SCALE * scale]);
+    const at = steers ? [0, 1].map((d) => px.reduce((sum, p) => sum + p[d], 0) / px.length) : null;
     const path = new Path2D();
-    for (const [x, y] of shape) path.lineTo(x * length * CAR_SCALE * scale, y * width * CAR_SCALE * scale);
+    for (const [x, y] of px) path.lineTo(x - (at ? at[0] : 0), y - (at ? at[1] : 0));
     path.closePath();
-    return [path, kind];
+    return [path, kind, at];
   });
   const reach = (length * CAR_SCALE * scale) / 2;
 
@@ -673,7 +683,9 @@ export function f1tenth(arrays) {
   const hudTop = H - HUD_H, cell = W / cars, pad = 4, r = 11;
   const barY = hudTop + pad + 2 * r + 4;
   const roomy = cell >= 90;
-  const { place, slide, far } = raceOrder(center, pose, isCrashed, start, steps, cars);
+  // with arrays.crashed_last, the race ranked crashed cars behind the running ones
+  const crashedLast = arrays.crashed_last !== undefined && arrays.crashed_last.data[0] !== 0;
+  const { place, slide, far } = raceOrder(center, pose, isCrashed, start, steps, cars, crashedLast);
   const crossings = lapCrossings(far, center.length, isCrashed, steps, cars);
   // every lap anyone finished, [when, how long], to tell the fastest so far
   const allLaps = crossings.flatMap((done) => done.slice(1).map((c, k) => [c, c - done[k]]));
@@ -847,9 +859,19 @@ export function f1tenth(arrays) {
         ctx.save();
         // y is up in the world and down on the screen
         ctx.transform(cos, -sin, -sin, -cos, x, y);
-        for (const [path, kind] of parts) {
+        // the front wheels at the car's steering angle, positive to the left
+        const steering = steer ? steer.data[t * cars + i] : 0;
+        for (const [path, kind, at] of parts) {
           ctx.fillStyle = kind === "light" && lit ? css(BRAKE_ON) : colors[kind];
-          ctx.fill(path);
+          if (at) {
+            ctx.save();
+            ctx.translate(at[0], at[1]);
+            ctx.rotate(steering);
+            ctx.fill(path);
+            ctx.restore();
+          } else {
+            ctx.fill(path);
+          }
         }
         ctx.restore();
       }

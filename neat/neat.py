@@ -1,7 +1,7 @@
 import concurrent.futures
 from dataclasses import replace
 from functools import partial
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from monitor import Members, Monitor, Networks, Returns
 from neat.activations import ActivationSelector
 from neat.config import GenomeConfig, NEATConfig
-from neat.fitness import Recording, Scores
+from neat.fitness import Recording, Scores, describe_stats
 from neat.genome import (
     Genome,
     extend_capacity,
@@ -104,11 +104,12 @@ def evaluate(
     population: Population,
     fitness_fn: FitnessFn,
     activation_selector: ActivationSelector,
-) -> Tuple[Population, Optional[Recording], jax.Array]:
+) -> Tuple[Population, Optional[Recording], jax.Array, Dict[str, jax.Array]]:
     """Evaluate the fitness of every genome; also returns the episodes they played,
-    if the fitness function recorded them, and each one's reward in every episode,
+    if the fitness function recorded them, each one's reward in every episode,
     (episodes, genomes): just its fitness, as one episode, if the fitness function
-    doesn't give them"""
+    doesn't give them, and the metrics of the stats of their episodes, if it gives
+    those (see neat.fitness.describe_stats)"""
     population = replace(
         population, batched_genome=prepare_for_inference(population.batched_genome)
     )
@@ -120,12 +121,15 @@ def evaluate(
     )
     # store raw fitnesses in genome
     genome = replace(genome, fitness=fitnesses)
+    metrics = {}
     if isinstance(aux, Scores):
         recording, returns = aux.recording, aux.returns
+        if aux.stats is not None:
+            metrics = describe_stats(aux.stats)
     else:
         recording = aux if isinstance(aux, Recording) else None
         returns = fitnesses[None]
-    return replace(population, batched_genome=genome), recording, returns
+    return replace(population, batched_genome=genome), recording, returns, metrics
 
 
 def evolve_one_generation(
@@ -167,7 +171,8 @@ class NEAT:
 
     # jitted steps, bound to the config and fitness functions in __init__
     evaluate_population: Callable[
-        [jax.Array, Population], Tuple[Population, Optional[Recording], jax.Array]
+        [jax.Array, Population],
+        Tuple[Population, Optional[Recording], jax.Array, Dict[str, jax.Array]],
     ]
     evolve: Callable[[jax.Array, Population], Population]
     test: Optional[Callable[[jax.Array, Population], TestResult]]
@@ -263,7 +268,7 @@ class NEAT:
             results = {}
             rng, gen_rng, eval_rng, test_rng = jax.random.split(rng, 4)
             # evaluate population
-            population, recording, returns = self.evaluate_population(
+            population, recording, returns, stats = self.evaluate_population(
                 eval_rng, population
             )
             # adjust mutation noise
@@ -286,6 +291,8 @@ class NEAT:
                     "mean_connections": population.batched_genome.num_enabled_connections.mean(),
                     "mean_condensed_connections": population.batched_genome.condensed_size.mean(),
                     "num_species": num_unique_species,
+                    # the stats of the episodes the population was scored on
+                    **stats,
                 }
             )
             new_species_stats = get_species_stats(

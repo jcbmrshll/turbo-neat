@@ -90,6 +90,16 @@ class SelectionConfig:
     # new species, if there are fewer than maximum_species; otherwise it joins the
     # nearest species
     speciation_threshold: float = 3.0
+    # if set, new species only start while there are fewer than this, and the
+    # threshold above is where it starts: after each generation's speciation it's
+    # divided by speciation_threshold_step while there are fewer species than this
+    # (never below min_speciation_threshold), and held otherwise, but never more
+    # than a step above the furthest any member was from its nearest species, so
+    # that a species that dies out is soon replaced by the members furthest from
+    # the rest
+    target_species: Optional[int] = None
+    speciation_threshold_step: float = 1.05
+    min_speciation_threshold: float = 0.05
     # the fraction of each species, rounded down, carried over unchanged as elites:
     # its fittest members, at most as many as the species has places
     elitism: float = 0.1

@@ -24,6 +24,14 @@ class SpeciesData:
     stagnation: jax.Array
     species_age: jax.Array
     mask: jax.Array
+    # each genome's distance to the species nearest it (its mean distance to that
+    # species' members) as it was speciated: the most, and the sum and count of
+    # those there was a species to measure to, this generation
+    distance_max: jax.Array
+    distance_sum: jax.Array
+    distance_count: jax.Array
+    # the speciation threshold in use (see SelectionConfig.target_species)
+    threshold: jax.Array
 
 
 def next_gen(species_data: SpeciesData, ema_period: int) -> SpeciesData:
@@ -58,6 +66,9 @@ def reset_counts(species_data: SpeciesData) -> SpeciesData:
         species_data,
         cumulative_fitness=jnp.zeros_like(species_data.cumulative_fitness),
         species_size=jnp.zeros_like(species_data.species_size),
+        distance_max=jnp.zeros_like(species_data.distance_max),
+        distance_sum=jnp.zeros_like(species_data.distance_sum),
+        distance_count=jnp.zeros_like(species_data.distance_count),
     )
 
 
@@ -126,7 +137,11 @@ def assign_species(
     fitness: jax.Array,
     min_distance_threshold: Optional[float] = None,
     max_transfer_age: Optional[int] = None,
+    species_limit: Optional[int] = None,
 ) -> Tuple[SpeciesData, jax.Array]:
+    """Puts a member in the species nearest it, or starts a new species if every
+    species is further than min_distance_threshold and there are fewer than
+    species_limit (by default, as many as there's room for)."""
     transfer_age_limit = jnp.inf if max_transfer_age is None else max_transfer_age
 
     species_distances = jnp.where(species_data.mask, distances, jnp.inf)
@@ -135,8 +150,11 @@ def assign_species(
 
     create_new = False
     if min_distance_threshold is not None:
+        limit = species_data.species_id.shape[0]
+        if species_limit is not None:
+            limit = min(limit, species_limit)
         create_new = (min_distances > min_distance_threshold) & (
-            species_data.next_idx < species_data.species_id.shape[0]
+            species_data.next_idx < limit
         )
     # check if the species is too old to be transferred to
     assigned_species_id = jnp.where(
@@ -193,6 +211,14 @@ def get_species_stats(species_data: SpeciesData, prev_stats) -> Dict:
     for k, v in prev_stats.items():
         if k not in species_dict and "species_dominance" in k and v > 0.0:
             species_dict[k] = 0.0
+    # how far genomes were from the species nearest them: a genome further than the
+    # speciation threshold starts a new one
+    if species_data.distance_count > 0:
+        species_dict["speciation_distance/max"] = float(species_data.distance_max)
+        species_dict["speciation_distance/mean"] = float(
+            species_data.distance_sum / species_data.distance_count
+        )
+    species_dict["speciation_distance/threshold"] = float(species_data.threshold)
     return species_dict
 
 
@@ -329,7 +355,9 @@ def fill_prev_stats(prev_stats, cur_stats) -> Dict:
     return prev_stats
 
 
-def init_species_data(maximum_species: int, next_species_id: int = 0) -> SpeciesData:
+def init_species_data(
+    maximum_species: int, next_species_id: int = 0, threshold: float = 3.0
+) -> SpeciesData:
     return SpeciesData(
         next_idx=jnp.int32(0),
         next_species_id=jnp.int32(next_species_id),
@@ -343,6 +371,10 @@ def init_species_data(maximum_species: int, next_species_id: int = 0) -> Species
         stagnation=jnp.zeros(maximum_species, dtype=jnp.int32),
         mask=jnp.zeros(maximum_species, dtype=jnp.bool_),
         species_age=jnp.zeros(maximum_species, dtype=jnp.int32),
+        distance_max=jnp.float32(0),
+        distance_sum=jnp.float32(0),
+        distance_count=jnp.int32(0),
+        threshold=jnp.float32(threshold),
     )
 
 
@@ -362,15 +394,21 @@ def make_improvement_stagnation_fn(max_stagnated_steps: int) -> StagnationFn:
     return stagnated
 
 
-def make_relative_fitness_stagnation_fn(minimum_stagnation: int) -> StagnationFn:
+def make_relative_fitness_stagnation_fn(
+    minimum_stagnation: int, full_target: Optional[int] = None
+) -> StagnationFn:
     """Removes every species that hasn't set a new best in minimum_stagnation
-    generations and whose fitness is below the mean of all species'."""
+    generations and whose fitness is below the mean of all species', and with
+    full_target, only once there are at least full_target species."""
 
     def stagnated(species_data: SpeciesData) -> jax.Array:
         fitness_mean = jnp.mean(species_data.ema_fitness, where=species_data.mask)
-        return (species_data.stagnation >= minimum_stagnation) & (
+        stagnant = (species_data.stagnation >= minimum_stagnation) & (
             species_data.ema_fitness < fitness_mean
         )
+        if full_target is None:
+            return stagnant
+        return stagnant & (species_data.next_idx >= full_target)
 
     return stagnated
 

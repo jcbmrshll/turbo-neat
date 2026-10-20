@@ -1,30 +1,36 @@
 """Race F1TENTH cars by self-play.
 
-Genomes are shuffled into races of --cars cars on one of F1TENTH's tracks, and each
-scores the distance it covers before the clock runs out. A car that touches a wall
-or another car is out of the race, and stays on the track as a wreck for the others
-to avoid. Each car sees a lidar sweep, its own speed, steering and heading, and the
-cars around it.
+Each generation, every genome races --rounds times in races of --cars cars on one
+of F1TENTH's tracks, and scores the place it finishes in: 1 for first down to 0
+for last, by how far round the track it is from the start line, plus a little for
+the distance it covers (--distance-bonus, for covering --max-speed x
+--race-seconds), so that a leader has no reason to stop. A car that touches a
+wall or another car is out of the race, and stays on the track as a wreck where it
+stopped, holding its place until the others pass it. The grid is in rows of two
+(--cars-per-row), and every genome starts from every place on it equally often
+(--balance-grid), so that its mean starting place is the same as every other's.
+Each car sees a lidar sweep of the walls and the other cars (each beam also
+sweeping the angle to the next for cars, so none can hide between beams), its own
+speed, steering, yaw rate, slip and position on the track, and the cars around it.
 
-To see how good the best are, every --test-every generations the --cars fittest
-race each other (--field-races races, starting from every place on the grid in
-turn), and the monitor shows one of their races and logs five stats of each car in
-them: its average lap time in seconds, over the laps it completed (a lap being the
-track's length from its place on the grid), how many times it passed a car that was
-still racing, whether it crashed, and its average and top speed in m/s while it was
-still racing. Each is the car's mean over the races (lap time over those it
-completed a lap in), and the monitor charts the mean, least and most over the cars
-(lap_time, passes, crashes, avg_speed, top_speed). With --test bots, the 10 fittest
-each race pure pursuit bots that follow the track's centerline instead, scoring the
-distance they cover, and the monitor shows the best one's race.
+Every generation logs stats of the cars in those races, each a car's mean over its
+races: the distance it covered; its average lap time in seconds over the laps it
+completed (a lap being the track's length from its place on the grid); how many
+times it passed a car still racing (by a car length); whether it crashed, into
+another car or anything else; and its average and top speed while it was racing.
+The monitor charts their mean, least and most over the population (distance,
+lap_time, passes, crashes, car_crashes, wall_crashes, avg_speed, top_speed).
+Every --test-every generations, a field of mixed strength (the genomes at ranks
+--field-ranks in fitness) race each other from a grid in no order of fitness, for
+the monitor to show. With --test bots, the 10 fittest each race pure pursuit bots
+that follow the track's centerline instead.
 
-The defaults race 11 cars, 8 m apart on the grid, 20 races per genome each
-generation, in 20-second races, and test the field in 120-second races. Self-play
-takes a while to get going: in three runs of them, the cars only learned to race
-past the first corner after about 130, 180 and 550 generations. Two of those
-fields went on to cover more than a lap of Spielberg (about 343 m) in a test race,
-the faster by generation 350. 1000 generations take about 5.5 hours on an RTX
-5080.
+Self-play takes a while to get going: in a run of the defaults on Spielberg (a 343
+m lap), the cars stayed near the grid for about 100 generations, then took to the
+track: by generation 200 the average car covered 0.9 of a lap in a 60-second race,
+and by 500 it covered 1.3 laps (the best about 1.75), its laps taking 37 seconds
+(the fastest 32), with a quarter of the cars crashing (from 80% at generation 100).
+1000 generations take about 11 hours on an RTX 5080.
 
     uv run examples/f1tenth.py
     uv run examples/f1tenth.py --monitor
@@ -34,7 +40,7 @@ Start the monitor first with `uv run turbo-neat-monitor`.
 
 import argparse
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -53,7 +59,7 @@ from neat.fitness import (
     make_test_fn,
 )
 from neat.neat import NEAT
-from neat.species import make_remove_last_if_stagnant_and_full_stagnation_fn
+from neat.species import make_relative_fitness_stagnation_fn
 from neat.testing import make_field_test, make_top_k_test
 
 # The env's own lidar and wall check are too slow for a population: its lidar ray
@@ -75,9 +81,17 @@ WALL_CHECK_SPACING = 0.1
 # control rate
 RECORD_HZ = 20
 # the starting grid: metres between places, and either side of the centerline
-GRID_SPACING, GRID_OFFSET = 8.0, 0.4
+GRID_SPACING, GRID_OFFSET = 6.0, 0.4
+# the field test's cars by their rank in fitness, for 6 cars: a field of mixed
+# strength, in no order on the grid, so that the fast catch the slow
+FIELD_RANKS = (1, 2, 8, 16, 64, 128)
 # a car this far off the centerline has left the track (Spielberg is 2.2m wide)
 MAX_LATERAL_ERROR = 1.5
+# a pass counts once a car is this many car lengths ahead of the other, and it has
+# to drop as far behind before it can pass that car again
+PASS_MARGIN = 1.0
+# seconds over which a car's acceleration noise (with --accel-noise) drifts
+ACCEL_NOISE_TIME = 0.5
 
 
 @jax.tree_util.register_dataclass
@@ -97,13 +111,23 @@ class RaceState:
     # step it completed the last one on
     laps: jax.Array
     lap_steps: jax.Array
-    # how many times each car passed (or lapped) a car still in the race
+    # how many times each car passed (or lapped) a car still in the race, and
+    # (cars, cars) how many laps each car counts as ahead of each other one
     passes: jax.Array
+    laps_ahead: jax.Array
     # each car's steps still racing, the sum of its speeds over them, and the
     # fastest of them, in m/s
     racing_steps: jax.Array
     speed_sum: jax.Array
     top_speed: jax.Array
+    # whether each car is out from touching another car (racing or a wreck), or
+    # from anything else: a wall, or leaving the track
+    car_crashes: jax.Array
+    wall_crashes: jax.Array
+    # each car's acceleration error this step, in m/s^2
+    accel_noise: jax.Array
+    # each car's score for its place in the race so far, 1 leading to 0 last
+    place: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -131,9 +155,20 @@ class F1TenthRace:
         timestep_ratio: int = 1,
         max_speed: float = 20.0,
         grid_spacing: float = GRID_SPACING,
+        crash_penalty: float = 0.0,
+        grid_spacing_jitter: float = 0.0,
+        cars_per_row: int = 1,
+        accel_noise: float = 0.0,
+        reward: str = "distance",
+        crashed_last: bool = False,
+        distance_weight: float = 0.0,
+        lidar_cars: bool = False,
+        lidar_rays: int = 1,
     ):
+        assert reward in ("distance", "placement"), f"no reward {reward!r}"
         self.num_players = num_cars
         self.max_speed = max_speed
+        self.crashed_last = crashed_last
         self.env = env = make(
             f"{map_name}_{num_cars}_noscan_nocollision_progress"
             f"_velocity+steeringangle_{timestep_ratio}_v0",
@@ -163,16 +198,63 @@ class F1TenthRace:
             return jnp.where(on_map, distance_transform[row, col], 0.0)
 
         beam_angles = jnp.linspace(-LIDAR_FOV / 2, LIDAR_FOV / 2, num_beams)
+        # each beam reads what its own ray hits; with lidar_cars and lidar_rays > 1, it
+        # also sweeps its sector (the angle between beams) with that many more rays,
+        # and reads the nearest car any of them hits before a wall, if nearer, so
+        # that a car can't hide between two beams (walls still read along the beam)
+        sector = LIDAR_FOV / max(num_beams - 1, 1)
+        sweep = lidar_rays if lidar_cars and lidar_rays > 1 else 0
+        ray_offsets = jnp.concatenate(
+            (jnp.zeros(1), ((jnp.arange(sweep) + 0.5) / max(sweep, 1) - 0.5) * sector)
+        )
+        ray_angles = (beam_angles[:, None] + ray_offsets[None, :]).ravel()
+        half_size = jnp.array([params.length / 2, params.width / 2])
+
+        def car_distance(points, poses):
+            """Each car's rays' points' distance to the nearest other car's body,
+            (cars, rays): to the rectangle around its pose, 0 inside it."""
+            offset = points[:, :, None, :] - poses[None, None, :, :2]
+            cos, sin = jnp.cos(poses[:, 2]), jnp.sin(poses[:, 2])
+            local = jnp.stack(
+                (
+                    offset[..., 0] * cos + offset[..., 1] * sin,
+                    -offset[..., 0] * sin + offset[..., 1] * cos,
+                ),
+                axis=-1,
+            )
+            outside = jnp.abs(local) - half_size
+            distance = jnp.linalg.norm(
+                jnp.maximum(outside, 0.0), axis=-1
+            ) + jnp.minimum(outside.max(axis=-1), 0.0)
+            # not its own body, which every ray starts inside
+            own = jnp.eye(num_cars, dtype=bool)[:, None, :]
+            return jnp.where(own, jnp.inf, jnp.maximum(distance, 0.0)).min(axis=-1)
 
         def lidar(poses):
-            angles = poses[:, 2:3] + beam_angles
+            angles = poses[:, 2:3] + ray_angles
             directions = jnp.stack((jnp.cos(angles), jnp.sin(angles)), axis=-1)
 
+            def ends(ranges):
+                return poses[:, None, :2] + ranges[..., None] * directions
+
             def march(_, ranges):
-                hits = poses[:, None, :2] + ranges[..., None] * directions
-                return ranges + wall_distance(hits)
+                hits = ends(ranges)
+                step = wall_distance(hits)
+                if lidar_cars:
+                    step = jnp.minimum(step, car_distance(hits, poses))
+                return ranges + step
 
             ranges = jax.lax.fori_loop(0, lidar_steps, march, jnp.zeros(angles.shape))
+            ranges = ranges.reshape(num_cars, num_beams, 1 + sweep)
+            if sweep:
+                # the sweep's rays that stopped at a car, not a wall
+                hits = ends(ranges.reshape(num_cars, -1))
+                at_car = car_distance(hits, poses) < wall_distance(hits)
+                at_car = at_car.reshape(ranges.shape)[..., 1:]
+                swept = jnp.where(at_car, ranges[..., 1:], jnp.inf).min(axis=-1)
+                ranges = jnp.minimum(ranges[..., 0], swept)
+            else:
+                ranges = ranges[..., 0]
             return jnp.minimum(ranges, sensing) / sensing
 
         def vertices(poses):
@@ -180,10 +262,11 @@ class F1TenthRace:
                 lambda p: get_vertices(p, length=params.length, width=params.width)
             )(poses)
 
-        def settle(state: State) -> State:
+        def settle(state: State) -> Tuple[State, jax.Array]:
             """Crashes: a car that hits a wall during this step goes back to the last
             place along it that was clear and stops there, and any car touching a
-            wall or another car, or off the track, is out of the race."""
+            wall or another car, or off the track, is out of the race. Also returns
+            which cars are touching another car."""
             last = state.last_cartesian_states[:, [0, 1, 4]]
             pose = state.cartesian_states[:, [0, 1, 4]]
             fractions = jnp.linspace(0, 1, wall_checks + 1)
@@ -222,9 +305,16 @@ class F1TenthRace:
             i, j = np.triu_indices(num_cars, 1)
             pairs = jax.vmap(collision)(jnp.concatenate((corners[i], corners[j]), -1))
             hit_car = jnp.zeros(num_cars, bool).at[i].max(pairs).at[j].max(pairs)
-            return state.replace(
-                collisions=state.collisions | hit_wall | off_track | hit_car
-            )
+            # a car out of the race, whatever put it out, is a standing wreck: no
+            # speed, yaw rate or slip, so the others sense it standing still
+            out = state.collisions | hit_wall | off_track | hit_car
+            cars = state.cartesian_states
+            # columns x, y, steer, speed, yaw, then yaw rate and slip
+            column = jnp.arange(cars.shape[1])
+            moving = (column == 3) | (column >= 5)
+            cars = jnp.where(out[:, None] & moving, 0.0, cars)
+            state = state.replace(collisions=out, cartesian_states=cars)
+            return state, hit_car
 
         def progress(state: State) -> jax.Array:
             """Metres each car advanced along the track this step, as the env's own
@@ -240,17 +330,19 @@ class F1TenthRace:
                 jnp.where(gain < -half, gain + env.track_length, gain),
             )
 
-        def passes(before, after, racing):
-            """How many times each car got a lap further on than another car still
-            racing, between positions before and after along the track (counting
-            laps): passing it, or lapping it."""
+        margin = PASS_MARGIN * params.length
 
-            def laps_ahead(position):
-                gap = position[:, None] - position[None, :]
-                return jnp.floor(gap / env.track_length)
-
-            gained = jnp.maximum(laps_ahead(after) - laps_ahead(before), 0.0)
-            return (gained * racing[None, :]).sum(axis=1).astype(jnp.int32)
+        def passes(laps_ahead, position, racing):
+            """Each car's laps ahead of each other one at position along the track
+            (counting laps), going up a lap once it's margin past it and down once
+            it's margin short of it, and how many times each car went up on a car
+            still racing: passed it, or lapped it."""
+            gap = position[:, None] - position[None, :]
+            lap = env.track_length
+            up = gap >= (laps_ahead + 1) * lap + margin
+            down = gap < laps_ahead * lap - margin
+            laps_ahead = laps_ahead + up - down
+            return laps_ahead, (up & racing[None, :]).sum(axis=1).astype(jnp.int32)
 
         def observe(state: State) -> jax.Array:
             x, y, steer, speed, yaw, yaw_rate, slip = state.cartesian_states.T
@@ -288,15 +380,27 @@ class F1TenthRace:
             ).reshape(num_cars, -1)
             return jnp.concatenate((scan, own, others), axis=1)
 
+        num_rows = -(-num_cars // cars_per_row)
+
         def reset_fn(key: jax.Array) -> RaceState:
             next_key, key = jax.random.split(key)
+            gap_key, noise_key = jax.random.split(jax.random.fold_in(key, 1))
             _, env_state = env.reset(key)
             # the env lines the cars up nose to tail; start from a staggered grid
-            # instead, from the place on the track it picked at random
+            # instead, from the place on the track it picked at random: rows of
+            # cars_per_row side by side, each gap between rows grid_spacing_jitter
+            # either side of grid_spacing
             places = jnp.arange(num_cars)
+            gaps = (
+                grid_spacing
+                + jax.random.uniform(gap_key, (num_rows - 1,), minval=-1.0, maxval=1.0)
+                * grid_spacing_jitter
+            )
+            rows_behind = jnp.concatenate((jnp.zeros(1), jnp.cumsum(gaps)))
+            behind = rows_behind[places // cars_per_row]
             frenet = jnp.column_stack(
                 (
-                    env_state.frenet_states[0, 0] - grid_spacing * places,
+                    env_state.frenet_states[0, 0] - behind,
                     jnp.where(places % 2 == 0, 1.0, -1.0) * GRID_OFFSET,
                     jnp.zeros(num_cars),
                 )
@@ -320,13 +424,32 @@ class F1TenthRace:
                 laps=zeros,
                 lap_steps=zeros,
                 passes=zeros,
+                laps_ahead=jnp.floor(
+                    (frenet[:, None, 0] - frenet[None, :, 0]) / env.track_length
+                ).astype(jnp.int32),
                 racing_steps=zeros,
                 speed_sum=jnp.zeros(num_cars),
                 top_speed=jnp.zeros(num_cars),
+                car_crashes=jnp.zeros(num_cars, bool),
+                wall_crashes=jnp.zeros(num_cars, bool),
+                accel_noise=accel_noise * jax.random.normal(noise_key, (num_cars,)),
+                place=jnp.zeros(num_cars),
             )
+
+        # the acceleration noise drifts (an Ornstein-Uhlenbeck process), keeping a
+        # standard deviation of accel_noise
+        noise_decay = np.exp(-self.dt / ACCEL_NOISE_TIME)
+        noise_kick = accel_noise * np.sqrt(1 - noise_decay**2)
+
+        def place_score(position):
+            """Each car's score for its place, by how far round the track it is from
+            the grid: 1 for the leader down to 0 for the last car."""
+            place = jnp.argsort(jnp.argsort(-position))
+            return (num_cars - 1 - place) / max(num_cars - 1, 1)
 
         def step_fn(state: RaceState, actions: jax.Array):
             next_key, key = jax.random.split(state.key)
+            noise_key = jax.random.fold_in(key, 1)
             actions = jnp.clip(actions, -1.0, 1.0)
             controls = jnp.column_stack(
                 (actions[:, 0] * params.s_max, (actions[:, 1] + 1) / 2 * max_speed)
@@ -334,11 +457,47 @@ class F1TenthRace:
             _, env_state, _, _, _ = env.step_env(
                 key, state.env_state, dict(zip(env.agents, controls))
             )
+            # the cars still racing speed up or slow down by their noise, which the
+            # speed controller then works against
+            noise = noise_decay * state.accel_noise + noise_kick * jax.random.normal(
+                noise_key, (num_cars,)
+            )
+            speed = env_state.cartesian_states[:, 3]
+            if accel_noise > 0:
+                speed = jnp.clip(speed + noise * self.dt, params.v_min, params.v_max)
+            # never below standing still: the cars are only ever told to go forward,
+            # and the single-track model moves a car at no less than 1mm/s, but pulls
+            # its speed down 0.1 m/s every second it's told to stop (it steers
+            # towards the target from that 1mm/s), so a parked car's speed would run
+            # down to the env's -5 m/s while it stood still
+            speed = jnp.maximum(speed, 0.0)
+            speed = jnp.where(
+                env_state.collisions, env_state.cartesian_states[:, 3], speed
+            )
+            env_state = env_state.replace(
+                cartesian_states=env_state.cartesian_states.at[:, 3].set(speed)
+            )
             # the car that crashes this step keeps the progress it made up to the
             # crash, and the env freezes it in place from the next
-            env_state = settle(env_state)
-            rewards = progress(env_state)
-            total = state.rewards + rewards
+            env_state, hit_car = settle(env_state)
+            distance = progress(env_state)
+            total = state.rewards + distance
+            # the reward is the distance, or with reward "placement", the change in
+            # the car's place score, so that a race's rewards add up to the score of
+            # the place it finishes in; less crash_penalty on the step a car crashes
+            position = state.start + total
+            if crashed_last:
+                # every car out of the race places behind every car still in it
+                position = jnp.where(env_state.collisions, position - 1e6, position)
+            place = place_score(position)
+            # placement can add distance_weight per metre, a little for not stopping
+            progress_reward = (
+                distance
+                if reward == "distance"
+                else place - state.place + distance_weight * distance
+            )
+            crashed = env_state.collisions & ~state.env_state.collisions
+            rewards = progress_reward - crash_penalty * crashed
             steps = state.steps + 1
             # driving back over the line and on again doesn't count a lap twice
             laps = jnp.maximum(
@@ -346,6 +505,7 @@ class F1TenthRace:
             )
             # a step the car crashed on, or any after, isn't racing
             racing = ~env_state.collisions
+            laps_ahead, passed = passes(state.laps_ahead, state.start + total, racing)
             speed = jnp.where(racing, env_state.cartesian_states[:, 3], 0.0)
             state = RaceState(
                 env_state=env_state,
@@ -356,25 +516,28 @@ class F1TenthRace:
                 start=state.start,
                 laps=laps,
                 lap_steps=jnp.where(laps > state.laps, steps, state.lap_steps),
-                passes=state.passes
-                + passes(
-                    state.start + state.rewards,
-                    state.start + total,
-                    racing,
-                ),
+                passes=state.passes + passed,
+                laps_ahead=laps_ahead,
                 racing_steps=state.racing_steps + racing,
                 speed_sum=state.speed_sum + speed,
                 top_speed=jnp.maximum(state.top_speed, speed),
+                car_crashes=state.car_crashes | (crashed & hit_car),
+                wall_crashes=state.wall_crashes | (crashed & ~hit_car),
+                accel_noise=noise,
+                place=place,
             )
             return state, rewards, env_state.collisions.all()
 
         def stats(state: RaceState) -> dict:
-            """Each car's average lap time in seconds over the laps it completed
-            (NaN without one), how many times it passed a car still racing,
-            whether it crashed, and its average and top speed while it was still
-            racing (NaN if it never was): of a race, or a batch of races."""
+            """Each car's distance covered in metres, its average lap time in
+            seconds over the laps it completed (NaN without one), how many times it
+            passed a car still racing (by a car length), whether it crashed, and
+            whether into another car or anything else, and its average and
+            top speed while it was still racing (NaN if it never was): of a race,
+            or a batch of races."""
             raced = state.racing_steps > 0
             return dict(
+                distance=state.rewards,
                 lap_time=jnp.where(
                     state.laps > 0,
                     state.lap_steps * dt / jnp.maximum(state.laps, 1),
@@ -382,6 +545,8 @@ class F1TenthRace:
                 ),
                 passes=state.passes.astype(jnp.float32),
                 crashes=state.env_state.collisions.astype(jnp.float32),
+                car_crashes=state.car_crashes.astype(jnp.float32),
+                wall_crashes=state.wall_crashes.astype(jnp.float32),
                 avg_speed=jnp.where(
                     raced,
                     state.speed_sum / jnp.maximum(state.racing_steps, 1),
@@ -513,7 +678,12 @@ class RaceAgainstBots:
 
 
 def make_config(
-    input_size: int, output_size: int, num_cars: int, population_size: int = 1000
+    input_size: int,
+    output_size: int,
+    num_cars: int,
+    population_size: int = 1000,
+    speciation_threshold: float = 2.0,
+    target_species: Optional[int] = None,
 ) -> NEATConfig:
     mutation_config = MutationConfig(
         add_connection_prob=0.05,
@@ -554,16 +724,24 @@ def make_config(
         init_mode="partial",
     )
 
+    maximum_species = 5
     selection_config = SelectionConfig(
         population_size=population_size,
         cutoff_pct=0.1,
-        speciation_threshold=2.0,
+        speciation_threshold=speciation_threshold,
         compatibility_coefficients=(1.0, 0.5),
         elitism=0.1,
-        stagnation_fn=make_remove_last_if_stagnant_and_full_stagnation_fn(
-            max_stagnated_steps=20, full_target=5
+        # self-play scores are relative, so a species' fitness can stop rising while
+        # it still improves: only remove stagnant species that are also below the
+        # mean, and only once there are as many species as there can be
+        stagnation_fn=make_relative_fitness_stagnation_fn(
+            minimum_stagnation=20, full_target=maximum_species
         ),
-        maximum_species=5,
+        maximum_species=maximum_species,
+        # with a target, the threshold adapts to keep that many species
+        # (speciation_threshold is where it starts): genomes converge as a run goes
+        # on, and a fixed threshold that splits them early stops splitting them later
+        target_species=target_species,
         selection_tournament_size=5,
         fitness_ema_period=5,
     )
@@ -630,6 +808,10 @@ def make_episode_fn(race: F1TenthRace):
             rewards=np.asarray(rewards),
             obs=obs,
         )
+        if race.crashed_last and not against_bots:
+            # the monitor ranks crashed cars behind every car still racing, as
+            # the reward does
+            data["crashed_last"] = np.ones(races + (1,), np.float32)
         if against_bots:
             data["policy"] = np.asarray(state.seat[0])
             data["obs_seats"] = np.asarray(state.seat[:1])
@@ -645,10 +827,10 @@ def main():
     parser = argparse.ArgumentParser(description="Race F1TENTH cars by self-play.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generations", type=int, default=1000)
-    parser.add_argument("--cars", type=int, default=11, help="cars in each race")
+    parser.add_argument("--cars", type=int, default=6, help="cars in each race")
     parser.add_argument("--map", default="Spielberg", help="an F1TENTH track")
     parser.add_argument(
-        "--race-seconds", type=float, default=20.0, help="length of a race"
+        "--race-seconds", type=float, default=60.0, help="length of a race"
     )
     parser.add_argument(
         "--test-seconds",
@@ -658,7 +840,11 @@ def main():
         "--race-seconds",
     )
     parser.add_argument(
-        "--rounds", type=int, default=20, help="races each genome runs per generation"
+        "--rounds",
+        type=int,
+        default=6,
+        help="races each genome runs per generation (a multiple of --cars, with "
+        "--balance-grid, starts each from every place on the grid equally often)",
     )
     parser.add_argument(
         "--parallel-rounds",
@@ -674,6 +860,15 @@ def main():
         default="field",
         help="every --test-every generations, the --cars fittest race each other, or "
         "the 10 fittest each race the bots",
+    )
+    parser.add_argument(
+        "--field-ranks",
+        type=int,
+        nargs="+",
+        default=None,
+        help="the field test's cars by their rank in fitness (1 the fittest), one "
+        f"per car, for a field of mixed strength ({' '.join(map(str, FIELD_RANKS))} "
+        "by default with 6 cars, otherwise the --cars fittest)",
     )
     parser.add_argument(
         "--field-races",
@@ -702,6 +897,97 @@ def main():
         help="metres between places on the starting grid",
     )
     parser.add_argument(
+        "--cars-per-row",
+        type=int,
+        choices=(1, 2),
+        default=2,
+        help="cars side by side in each row of the starting grid: 1 for single "
+        "file, 2 for pairs as on an F1 grid; rows are --grid-spacing apart",
+    )
+    parser.add_argument(
+        "--grid-spacing-jitter",
+        type=float,
+        default=0.0,
+        help="metres either side of --grid-spacing each gap on the grid is drawn "
+        "from, in training races",
+    )
+    parser.add_argument(
+        "--accel-noise",
+        type=float,
+        default=0.0,
+        help="standard deviation of the noise in each car's acceleration, in m/s^2, "
+        f"drifting over {ACCEL_NOISE_TIME} s, in training races",
+    )
+    parser.add_argument(
+        "--test-grid-spacing",
+        type=float,
+        default=None,
+        help="metres between places on the test races' starting grid, if not "
+        "--grid-spacing",
+    )
+    parser.add_argument(
+        "--reward",
+        choices=("distance", "placement"),
+        default="placement",
+        help="what a car scores in a race: the distance it covers, or its place at "
+        "the finish (1 for first down to 0 for last)",
+    )
+    parser.add_argument(
+        "--distance-bonus",
+        type=float,
+        default=0.1,
+        help="with --reward placement, also this for covering --max-speed x "
+        "--race-seconds, and as much less for less (0.1 is half a place's "
+        "worth at the most, with 6 cars), so the leader has a reason not to stop",
+    )
+    parser.add_argument(
+        "--lidar-cars",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="the lidar sees the other cars (and wrecks) as well as the walls",
+    )
+    parser.add_argument(
+        "--lidar-rays",
+        type=int,
+        default=8,
+        help="with --lidar-cars, rays each lidar beam also sweeps its sector with, "
+        "reading the nearest car any of them hits, so that a car can't hide between "
+        "beams (walls still read along the beam)",
+    )
+    parser.add_argument(
+        "--crashed-last",
+        action="store_true",
+        help="with --reward placement, every car that crashed places behind every "
+        "car still racing (the crashed ones by how far they got)",
+    )
+    parser.add_argument(
+        "--balance-grid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="start every genome from every place on the grid equally often over "
+        "its races (exactly so when --rounds is a multiple of --cars)",
+    )
+    parser.add_argument(
+        "--crash-penalty",
+        type=float,
+        default=0.0,
+        help="taken off a car's score when it crashes: metres with --reward "
+        "distance; with --reward placement, 1 / (cars - 1) is one place",
+    )
+    parser.add_argument(
+        "--speciation-threshold",
+        type=float,
+        default=2.0,
+        help="genome distance beyond which a genome starts a new species (where it "
+        "starts, with --target-species)",
+    )
+    parser.add_argument(
+        "--target-species",
+        type=int,
+        default=None,
+        help="adapt the speciation threshold to keep this many species (at most 5)",
+    )
+    parser.add_argument(
         "--monitor",
         nargs="?",
         const=DEFAULT_URL,
@@ -710,22 +996,57 @@ def main():
         help=f"log to a turbo-neat monitor (default {DEFAULT_URL})",
     )
     args = parser.parse_args()
+    if args.field_ranks is None and args.cars == len(FIELD_RANKS):
+        args.field_ranks = list(FIELD_RANKS)
+    if args.field_ranks is not None and (
+        len(args.field_ranks) != args.cars or max(args.field_ranks) > args.population
+    ):
+        parser.error("--field-ranks needs one rank per car, none above --population")
+    if not 0 <= args.grid_spacing_jitter < args.grid_spacing:
+        parser.error(
+            "--grid-spacing-jitter must be at least 0 and below --grid-spacing"
+        )
 
     race = F1TenthRace(
         args.cars,
         map_name=args.map,
         max_speed=args.max_speed,
         grid_spacing=args.grid_spacing,
+        crash_penalty=args.crash_penalty,
+        reward=args.reward,
+        crashed_last=args.crashed_last,
+        distance_weight=args.distance_bonus / (args.max_speed * args.race_seconds),
+        lidar_cars=args.lidar_cars,
+        lidar_rays=args.lidar_rays,
+        grid_spacing_jitter=args.grid_spacing_jitter,
+        cars_per_row=args.cars_per_row,
+        accel_noise=args.accel_noise,
     )
     race_steps = round(args.race_seconds / race.dt)
     # a race is done when every car is out, but it doesn't start over: the wrecks
     # just stand there, so score straight through and keep the last crash in replays
     max_resets = None
     test_steps = round((args.test_seconds or args.race_seconds) / race.dt)
+    # the test races start from an even grid, without noise
+    test_race = race
+    if (
+        args.test_grid_spacing is not None
+        or args.grid_spacing_jitter
+        or args.accel_noise
+    ):
+        test_race = F1TenthRace(
+            args.cars,
+            map_name=args.map,
+            max_speed=args.max_speed,
+            grid_spacing=args.test_grid_spacing or args.grid_spacing,
+            cars_per_row=args.cars_per_row,
+            lidar_cars=args.lidar_cars,
+            lidar_rays=args.lidar_rays,
+        )
     if args.test == "bots":
         test_fn = make_top_k_test(
             make_test_fn(
-                RaceAgainstBots(race),
+                RaceAgainstBots(test_race),
                 num_steps=test_steps,
                 num_episodes=args.field_races,
                 frames_every=race.record_every,
@@ -735,21 +1056,30 @@ def main():
     else:
         test_fn = make_field_test(
             make_mp_field_fn(
-                race,
+                test_race,
                 args.field_races,
                 test_steps,
                 max_resets=max_resets,
                 record_every=race.record_every,
                 record_fn=race.record_frame,
-                stats_fn=race.stats,
             ),
             size=args.cars,
-            # just their stats: distance is what fitness already logs
+            # just the race for the monitor: the stats come from training's races
             name=None,
+            ranks=args.field_ranks,
+            # from a grid in no order of fitness, so the fast can catch the slow
+            shuffle=True,
         )
 
     neat = NEAT(
-        config=make_config(race.obs_size, race.act_size, args.cars, args.population),
+        config=make_config(
+            race.obs_size,
+            race.act_size,
+            args.cars,
+            args.population,
+            args.speciation_threshold,
+            args.target_species,
+        ),
         # the first round's races are recorded for the monitor's lineage view
         fitness_fn=make_mp_fitness_fn(
             race,
@@ -760,6 +1090,9 @@ def main():
             record_every=race.record_every,
             record_fn=race.record_frame,
             parallel_rounds=args.parallel_rounds,
+            # lap time, passes, crashes and speeds, from every race
+            stats_fn=race.stats,
+            balance_seats=args.balance_grid,
         ),
         test_fn=test_fn,
         test_every=args.test_every,
